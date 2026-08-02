@@ -24,8 +24,9 @@ if len(sys.argv) < 2:
 beam_dir = sys.argv[1]
 
 # A stand-in station layout: elements on a 20 m ring. Replace with
-# ELEMENT_OFFSET from the PHASED_ARRAY subtable.
-num_elements = 16
+# ELEMENT_OFFSET from the PHASED_ARRAY subtable. The count has to match the
+# number of elements in the beam files, which is 256 for an SKA-Low station.
+num_elements = 256
 angles = np.linspace(0, 2 * np.pi, num_elements, endpoint=False)
 element_offsets = np.zeros((3, num_elements))
 element_offsets[0] = 20.0 * np.cos(angles)  # East

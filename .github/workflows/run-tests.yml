@@ -101,6 +101,32 @@ jobs:
             https://ws.mwatelescope.org/static/mwa_full_embedded_element_pattern.h5 \
             -o mwa_full_embedded_element_pattern.h5
 
+      - name: Cache SKA-Low beam files
+        id: cache-ska-low
+        uses: actions/cache@v5
+        with:
+          path: skalow_coeffs
+          key: ska-low-beam-files-v1
+
+      # EveryBeam ships these publicly in coeffs/skalow/. They are small
+      # (~600 KB each). Without them the ska_low real-file tests skip.
+      - name: Download SKA-Low beam files if cache was a miss
+        if: steps.cache-ska-low.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p skalow_coeffs
+          for f in 100.00000 103.12500 106.25000; do
+            curl -fL \
+              --retry 5 \
+              --retry-delay 10 \
+              --retry-all-errors \
+              --retry-max-time 120 \
+              "https://git.astron.nl/RD/EveryBeam/-/raw/master/coeffs/skalow/SKA-Low_Perturbed_Vogel_256_elem_FEKO_${f}_MHz.h5" \
+              -o "skalow_coeffs/SKA-Low_Perturbed_Vogel_256_elem_FEKO_${f}_MHz.h5"
+          done
+
+      - name: Point the tests at the SKA-Low beam files
+        run: echo "SKA_LOW_BEAM_DIR=${PWD}/skalow_coeffs" >> $GITHUB_ENV
+
       # Taken from https://github.com/dtolnay/thiserror/blob/a2d1ed1ccfc2a5dbb2a8fb45d4f938175a28bc86/.github/workflows/ci.yml
       - name: Enable type layout randomization
         run: echo RUSTFLAGS=${RUSTFLAGS}\ -Zrandomize-layout >> $GITHUB_ENV

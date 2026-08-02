@@ -186,7 +186,9 @@ impl GridFiles {
             return Err(SkaLowBeamError::GridShapeMismatch);
         }
         if shape[0] < 2 || shape[1] < 2 {
-            return Err(SkaLowBeamError::GridTooSmall(shape.as_array_view().to_vec()));
+            return Err(SkaLowBeamError::GridTooSmall(
+                shape.as_array_view().to_vec(),
+            ));
         }
 
         // eep.py conjugates on load, and negates the Y polarisation to match

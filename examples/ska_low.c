@@ -13,7 +13,8 @@
 
 #include "mwa_hyperbeam.h"
 
-#define NUM_ELEMENTS 16
+// Must match the number of elements in the beam files.
+#define NUM_ELEMENTS 256
 
 void handle_hyperbeam_error(char file[], int line_num, const char function_name[]) {
     int err_length = hb_last_error_length();

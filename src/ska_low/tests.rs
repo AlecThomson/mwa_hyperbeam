@@ -236,3 +236,266 @@ fn freqs_and_closest() {
     assert_abs_diff_eq!(beam.find_closest_freq(50e6), 100e6);
     assert_eq!(beam.num_elements(), N_ELEMENTS);
 }
+
+/// Tests against the real EveryBeam coefficient files, which are not committed;
+/// point `SKA_LOW_BEAM_DIR` at a directory of
+/// `SKA-Low_Perturbed_Vogel_256_elem_FEKO_*.h5` to run them.
+mod real_files {
+    use super::*;
+    use serial_test::serial;
+
+    const REAL_L_MAX: usize = 5;
+    const REAL_N_ELEMENTS: usize = 256;
+
+    fn beam_dir() -> Option<String> {
+        std::env::var("SKA_LOW_BEAM_DIR").ok()
+    }
+
+    fn beam(dir: &str) -> SkaLowBeam {
+        // The station layout isn't in the beam files; these tests only need a
+        // consistent one, so put every element at the origin and let the
+        // element patterns speak for themselves.
+        let offsets = Array2::zeros((3, REAL_N_ELEMENTS));
+        SkaLowBeam::new(dir, offsets.view(), None, false).unwrap()
+    }
+
+    /// The file's schema is what the loader expects: /modes is (3, 35) of
+    /// int32, giving l_max = 5, and /coefficients is (256, 35, 4) compound.
+    #[test]
+    #[serial]
+    fn reads_the_everybeam_schema() {
+        let Some(dir) = beam_dir() else { return };
+        let beam = beam(&dir);
+        assert_eq!(beam.num_elements(), REAL_N_ELEMENTS);
+        assert!(!beam.get_freqs().is_empty());
+        assert_abs_diff_eq!(beam.find_closest_freq(101e6), 100e6, epsilon = 1.0);
+
+        let prepared = beam
+            .prepare(100e6, &vec![c64::default(); REAL_N_ELEMENTS])
+            .unwrap();
+        match prepared {
+            Prepared::Swe { coeffs, .. } => {
+                assert_eq!(coeffs.l_max, REAL_L_MAX);
+                assert_eq!(coeffs.coeffs.dim(), (REAL_N_ELEMENTS, 35, 4));
+            }
+            Prepared::Grid { .. } => panic!("expected a spherical-wave source"),
+        }
+    }
+
+    /// The coefficients as this crate lays them out must produce what the
+    /// reference kernel produces from the same file. This is the check that the
+    /// (element, mode, component) axis order matches the flat
+    /// `4 * (n * (n + 1) + m - 1)` indexing the kernel does.
+    //
+    // Expected values from a C program that reads the same file with the HDF5
+    // C API and calls sdp_spherical_wave_pattern_feko from ska-sdp-func.
+    #[test]
+    #[serial]
+    fn element_patterns_match_the_reference() {
+        let Some(dir) = beam_dir() else { return };
+        let beam = beam(&dir);
+        let prepared = beam
+            .prepare(100e6, &vec![c64::default(); REAL_N_ELEMENTS])
+            .unwrap();
+        let Prepared::Swe { coeffs, .. } = prepared else {
+            panic!("expected a spherical-wave source")
+        };
+
+        let cases: [(usize, f64, f64, [c64; 4]); 4] = [
+            (
+                0,
+                0.4,
+                1.1,
+                [
+                    c64::new(0.30529999830290161, -0.26176162873213316),
+                    c64::new(-0.47268519583593221, 0.646198630437258),
+                    c64::new(0.1744977833984144, -0.22853724365298478),
+                    c64::new(-0.33095124044588531, 0.65795940881489512),
+                ],
+            ),
+            (
+                1,
+                0.4,
+                1.1,
+                [
+                    c64::new(0.23465885348319929, -0.31153981262260899),
+                    c64::new(-0.47948409276452481, 0.66619976605116815),
+                    c64::new(0.17649833030723994, -0.31450511028730954),
+                    c64::new(-0.35227071264967941, 0.55199859513848115),
+                ],
+            ),
+            (
+                255,
+                1.2,
+                -2.3,
+                [
+                    c64::new(-0.032028292714747719, 0.086761584350798338),
+                    c64::new(-0.10826804460798332, -0.36075552076197842),
+                    c64::new(-0.12354336405118108, 0.12071188484113851),
+                    c64::new(0.046348894411093182, -0.41453121253883596),
+                ],
+            ),
+            (
+                128,
+                0.0,
+                0.0,
+                [
+                    c64::new(0.64866091637639678, -0.66256351938788594),
+                    c64::new(-0.029630102870054954, 0.0080780906408140785),
+                    c64::new(0.60751075492056672, -0.63903642072990496),
+                    c64::new(0.025155482454602317, -0.016230465606812759),
+                ],
+            ),
+        ];
+
+        let root_n = crate::legendre::root_n_table(REAL_L_MAX);
+        let mut workspace = vec![0.0; REAL_L_MAX + 2];
+        for (element, theta, phi_x, expected) in cases {
+            let p = swe::spherical_wave_pattern_feko(
+                theta,
+                [phi_x, phi_x + FRAC_PI_2],
+                REAL_L_MAX,
+                &root_n,
+                coeffs.element(element),
+                false,
+                &mut workspace,
+            );
+            let got = [p.e_theta[0], p.e_phi[0], p.e_theta[1], p.e_phi[1]];
+            for (got, expected) in got.into_iter().zip(expected) {
+                assert_abs_diff_eq!(got.re, expected.re, epsilon = 1e-12);
+                assert_abs_diff_eq!(got.im, expected.im, epsilon = 1e-12);
+            }
+        }
+    }
+
+    /// A 256-element station with the elements spread out: the beam must be
+    /// finite, and steering the weights to a direction must maximise the
+    /// response there.
+    #[test]
+    #[serial]
+    fn station_beam_peaks_where_it_is_steered() {
+        let Some(dir) = beam_dir() else { return };
+        // Elements on a 20 m ring, which is enough structure for the geometric
+        // phase to matter.
+        let mut offsets = Array2::zeros((3, REAL_N_ELEMENTS));
+        for i in 0..REAL_N_ELEMENTS {
+            let angle = TAU * i as f64 / REAL_N_ELEMENTS as f64;
+            offsets[[0, i]] = 20.0 * angle.cos();
+            offsets[[1, i]] = 20.0 * angle.sin();
+        }
+        let beam = SkaLowBeam::new(&dir, offsets.view(), None, false).unwrap();
+
+        let freq_hz = 100e6;
+        let target = AzEl::from_radians(1.0, 1.0);
+        // Conjugate the geometric phase towards the target to steer there.
+        let k = [
+            target.az.sin() * target.el.cos(),
+            target.az.cos() * target.el.cos(),
+            target.el.sin(),
+        ];
+        let wavenumber = TAU * freq_hz / VEL_C;
+        let weights: Vec<c64> = (0..REAL_N_ELEMENTS)
+            .map(|i| {
+                let path: f64 = (0..3).map(|j| offsets[[j, i]] * k[j]).sum();
+                c64::cis(-wavenumber * path)
+            })
+            .collect();
+
+        let on = beam
+            .calc_jones(target, freq_hz, &weights, None, false)
+            .unwrap();
+        let on_power: f64 = on.iter().map(|j| j.norm_sqr()).sum();
+        assert!(on_power.is_finite() && on_power > 0.0);
+
+        // Every other direction in a spread should be weaker.
+        for (az, el) in [(0.0, 0.5), (2.0, 0.3), (-1.5, 1.2), (3.0, 0.8)] {
+            let off = beam
+                .calc_jones(AzEl::from_radians(az, el), freq_hz, &weights, None, false)
+                .unwrap();
+            let off_power: f64 = off.iter().map(|j| j.norm_sqr()).sum();
+            assert!(
+                off_power < on_power,
+                "steered power {on_power} was not the maximum; ({az}, {el}) gave {off_power}"
+            );
+        }
+    }
+
+    /// Files written by numpy itself, rather than by the hand-built buffers
+    /// the grid unit tests use, so that a bug shared between this crate's
+    /// reader and its test writer can't hide. Point `SKA_LOW_GRID_DIR` at a
+    /// directory holding both the .npy and .npz forms of the same data.
+    #[test]
+    #[serial]
+    fn gridded_files_from_numpy() {
+        let Some(dir) = std::env::var("SKA_LOW_GRID_DIR").ok() else {
+            return;
+        };
+        let filebase = "HARP_SKALA41_randvogel_1m_4_elem_50ohm_";
+        let n = 4;
+        let offsets = Array2::zeros((3, n));
+        let mut weights = vec![c64::default(); n];
+        weights[0] = c64::new(1.0, 0.0);
+        // az 90 deg (East) is EEP az 0, el 45 deg is za 45.
+        let azel = AzEl::from_radians(90f64.to_radians(), 45f64.to_radians());
+
+        // The four values numpy stored at that pixel, conjugated on load, with
+        // the Y polarisation negated, then assembled theta-first with the phi
+        // components negated.
+        let expected = [
+            c64::new(-0.06335825, 0.14406662),
+            c64::new(0.20452249, -1.4110916),
+            c64::new(0.13131122, 0.5075359),
+            c64::new(0.3747996, 0.657074),
+        ];
+
+        for format in [GridFormat::Npy, GridFormat::Npz] {
+            let beam =
+                SkaLowBeam::new_from_grid(&dir, filebase, format, offsets.view(), None, 0.0, false)
+                    .unwrap();
+            assert_eq!(beam.get_freqs(), &[99e6]);
+            let jones = beam.calc_jones(azel, 99e6, &weights, None, false).unwrap();
+            for i in 0..4 {
+                assert_abs_diff_eq!(jones[i].re, expected[i].re, epsilon = 1e-7);
+                assert_abs_diff_eq!(jones[i].im, expected[i].im, epsilon = 1e-7);
+            }
+        }
+    }
+
+    /// Loading is cached per frequency, and different frequencies give
+    /// different beams.
+    #[test]
+    #[serial]
+    fn frequencies_are_distinct_and_cached() {
+        let Some(dir) = beam_dir() else { return };
+        let beam = beam(&dir);
+        let freqs = beam.get_freqs().to_vec();
+        if freqs.len() < 2 {
+            return;
+        }
+
+        let mut weights = vec![c64::default(); REAL_N_ELEMENTS];
+        weights[0] = c64::new(1.0, 0.0);
+        let azel = AzEl::from_radians(1.1, 0.9);
+        let a = beam
+            .calc_jones(azel, freqs[0], &weights, None, false)
+            .unwrap();
+        let b = beam
+            .calc_jones(azel, freqs[1], &weights, None, false)
+            .unwrap();
+        assert!(
+            (0..4).any(|i| (a[i] - b[i]).norm() > 1e-9),
+            "two different frequencies gave the same element pattern"
+        );
+
+        // The second call for the same frequency comes out of the cache.
+        let a2 = beam
+            .calc_jones(azel, freqs[0], &weights, None, false)
+            .unwrap();
+        assert_abs_diff_eq!(a, a2, epsilon = 1e-15);
+        beam.empty_cache();
+        let a3 = beam
+            .calc_jones(azel, freqs[0], &weights, None, false)
+            .unwrap();
+        assert_abs_diff_eq!(a, a3, epsilon = 1e-15);
+    }
+}

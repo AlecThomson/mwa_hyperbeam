@@ -35,8 +35,10 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let beam_dir = args.next();
 
     // A stand-in station layout: elements on a 20 m ring. Replace this with
-    // ELEMENT_OFFSET from the PHASED_ARRAY subtable.
-    let num_elements = 16;
+    // ELEMENT_OFFSET from the PHASED_ARRAY subtable. The count has to match the
+    // number of elements in the beam files, which is 256 for an SKA-Low
+    // station.
+    let num_elements = 256;
     let mut element_offsets = Array2::zeros((3, num_elements));
     for i in 0..num_elements {
         let angle = TAU * i as f64 / num_elements as f64;
