@@ -15,6 +15,21 @@
 //! (`.npy`/`.npz`, four arrays per frequency) are sampled. They differ only in
 //! how one element is evaluated at one direction, so they are an enum rather
 //! than two beam types - everything downstream is shared.
+//!
+//! # Polarisation convention
+//!
+//! Returned [`Jones`] matrices follow the same convention as the FEE beam. The
+//! raw matrix is `[E_theta_x, -E_phi_x, E_theta_y, -E_phi_y]`: X feed first,
+//! theta before phi, with the phi components negated. That is the MWA ordering,
+//! *not* IAU, and not what EveryBeam or `eep.py` return (neither negates, and
+//! `eep.py` orders phi-first).
+//!
+//! Passing `latitude_rad` applies the parallactic-angle correction, and only
+//! then does `iau_order` do anything: `iau_order == true` swaps to the IAU
+//! (Y/north-first) row order, `false` keeps MWA (X-first) order. With
+//! `latitude_rad == None` the result stays in the beam's own (theta, phi) frame
+//! and `iau_order` is ignored. See
+//! <https://github.com/MWATelescope/mwa_hyperbeam/blob/main/fee_pols.pdf>.
 
 mod coeffs;
 mod error;
