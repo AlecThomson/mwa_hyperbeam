@@ -6,8 +6,50 @@
 
 use std::{
     collections::hash_map::DefaultHasher,
+    f64::consts::FRAC_PI_2,
     hash::{Hash, Hasher},
 };
+
+use marlu::{AzEl, Jones};
+
+/// Apply the parallactic angle correction to a beam-response Jones matrix (when
+/// also given its corresponding direction). Also re-arrange the Jones matrix if
+/// we need to; when `iau_order` is `true`, then the beam response is [NS-NS
+/// NS-EW EW-NS EW-EW](). Otherwise it is [EW-EW EW-NS NS-EW NS-NS]();
+///
+/// The Jones matrix is expected in the FEE beam's convention, i.e. its second
+/// and fourth components carry a negated phi component.
+///
+/// See for how/why this is done:
+/// <https://github.com/MWATelescope/mwa_hyperbeam/blob/main/fee_pols.pdf>
+pub(crate) fn apply_parallactic_correction(
+    az_rad: f64,
+    za_rad: f64,
+    latitude_rad: f64,
+    iau_order: bool,
+    jones: &mut Jones<f64>,
+) {
+    // Get the parallactic-angle and find its sine and cosine.
+    let para_angle = AzEl::from_radians(az_rad, FRAC_PI_2 - za_rad)
+        .to_hadec(latitude_rad)
+        .get_parallactic_angle(latitude_rad);
+    let (s_rot, c_rot) = para_angle.sin_cos();
+    *jones = if iau_order {
+        Jones::from([
+            jones[2] * -c_rot + jones[3] * s_rot,
+            jones[2] * -s_rot + jones[3] * -c_rot,
+            jones[0] * -c_rot + jones[1] * s_rot,
+            jones[0] * -s_rot + jones[1] * -c_rot,
+        ])
+    } else {
+        Jones::from([
+            jones[0] * -s_rot + jones[1] * -c_rot,
+            jones[0] * -c_rot + jones[1] * s_rot,
+            jones[2] * -s_rot + jones[3] * -c_rot,
+            jones[2] * -c_rot + jones[3] * s_rot,
+        ])
+    };
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Pol {

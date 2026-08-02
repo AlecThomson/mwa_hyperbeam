@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- SKA-Low station beams, as a new `ska_low` module alongside the MWA FEE and
+  analytic beams. `SkaLowBeam` sums per-element embedded element patterns into
+  one station Jones matrix, with the same parallactic-angle correction and IAU
+  ordering as `FEEBeam`.
+  - Two element sources: FEKO spherical-wave coefficients (HDF5, the EveryBeam
+    `/modes` + `/coefficients` schema) and gridded EEPs (`.npy` and `.npz`,
+    the `ska-low-mccs-calibration` layout). Both are read directly; there is no
+    conversion step.
+  - Station geometry (element offsets, the `PHASED_ARRAY` `COORDINATE_AXES`,
+    element flags as zero weights) is passed in by the caller. hyperbeam still
+    does not read MeasurementSets.
+  - C API: `new_ska_low_beam`, `new_ska_low_beam_from_grid`,
+    `ska_low_calc_jones`, `ska_low_calc_jones_array`, `ska_low_get_freqs`,
+    `ska_low_get_num_elements`, `ska_low_closest_freq`, `free_ska_low_beam`.
+  - Python API: `mwa_hyperbeam.SkaLowBeam`.
+  - The spherical-wave kernel and the normalised Legendre functions are ports
+    of `sdp_element_spherical_wave_feko.cpp` and `sdp_legendre_polynomial.h`
+    from ska-sdp-func (BSD-3-Clause), checked against the reference
+    implementation. GPU support is not included.
+
 ## [0.11.0] - 2026-06-05
 
 ### Changes

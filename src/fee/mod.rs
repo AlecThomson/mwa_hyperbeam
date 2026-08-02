@@ -34,7 +34,7 @@ use crate::{
     constants::*,
     factorial::FACTORIAL,
     legendre::p1sin,
-    types::{CacheKey, Pol},
+    types::{apply_parallactic_correction, CacheKey, Pol},
 };
 
 /// The main struct to be used for calculating Jones matrices.
@@ -865,40 +865,4 @@ fn fix_amps(amps: &[f64], delays: &[u32; 16]) -> [f64; 32] {
             }
         });
     full_amps
-}
-
-/// Apply the parallactic angle correction to a beam-response Jones matrix (when
-/// also given its corresponding direction). Also re-arrange the Jones matrix if
-/// we need to; when `iau_order` is `true`, then the beam response is [NS-NS
-/// NS-EW EW-NS EW-EW](). Otherwise it is [EW-EW EW-NS NS-EW NS-NS]();
-///
-/// See for how/why this is done:
-/// <https://github.com/MWATelescope/mwa_hyperbeam/blob/main/fee_pols.pdf>
-fn apply_parallactic_correction(
-    az_rad: f64,
-    za_rad: f64,
-    latitude_rad: f64,
-    iau_order: bool,
-    jones: &mut Jones<f64>,
-) {
-    // Get the parallactic-angle and find its sine and cosine.
-    let para_angle = AzEl::from_radians(az_rad, FRAC_PI_2 - za_rad)
-        .to_hadec(latitude_rad)
-        .get_parallactic_angle(latitude_rad);
-    let (s_rot, c_rot) = para_angle.sin_cos();
-    *jones = if iau_order {
-        Jones::from([
-            jones[2] * -c_rot + jones[3] * s_rot,
-            jones[2] * -s_rot + jones[3] * -c_rot,
-            jones[0] * -c_rot + jones[1] * s_rot,
-            jones[0] * -s_rot + jones[1] * -c_rot,
-        ])
-    } else {
-        Jones::from([
-            jones[0] * -s_rot + jones[1] * -c_rot,
-            jones[0] * -c_rot + jones[1] * s_rot,
-            jones[2] * -s_rot + jones[3] * -c_rot,
-            jones[2] * -c_rot + jones[3] * s_rot,
-        ])
-    };
 }
