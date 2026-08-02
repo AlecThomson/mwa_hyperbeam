@@ -731,7 +731,6 @@ mod tests {
             GridFormat::Npy,
             offsets.view(),
             None,
-            0.0,
             false,
         )
         .unwrap();

@@ -126,8 +126,6 @@ pub unsafe extern "C" fn new_ska_low_beam(
 /// * `is_npz` - a boolean; 1 for `.npz` files, 0 for `.npy`.
 /// * `num_elements`, `element_offsets`, `coordinate_axes` - as for
 ///   `new_ska_low_beam`.
-/// * `rotation_deg` - the rotation of the station, and therefore of the EEP
-///   azimuth axis, in degrees.
 /// * `normalise` - a boolean indicating whether to divide each element by its
 ///   power integral over the grid.
 /// * `ska_low_beam` - a double pointer to the `SkaLowBeam` struct which is set
@@ -153,7 +151,6 @@ pub unsafe extern "C" fn new_ska_low_beam_from_grid(
     num_elements: c_uint,
     element_offsets: *const f64,
     coordinate_axes: *const f64,
-    rotation_deg: f64,
     normalise: u8,
     ska_low_beam: *mut *mut SkaLowBeam,
 ) -> i32 {
@@ -182,7 +179,6 @@ pub unsafe extern "C" fn new_ska_low_beam_from_grid(
         format,
         offsets.view(),
         axes_from_ffi(coordinate_axes),
-        rotation_deg,
         normalise != 0,
     ) {
         Ok(b) => {

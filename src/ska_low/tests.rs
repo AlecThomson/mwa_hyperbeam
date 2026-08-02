@@ -184,36 +184,36 @@ fn station_sum_is_linear_in_the_weights() {
     }
 }
 
-/// A quarter-turn of the station's coordinate axes about Up must send an
-/// offset along p to one along q.
+/// Turning the station by an azimuth must be indistinguishable from turning the
+/// sky the other way: the offsets *and* the element patterns rotate together.
+/// Missing either rotation, or getting its sign wrong, breaks this.
 #[test]
-fn coordinate_axes_rotate_the_offsets() {
+fn rotating_the_station_is_rotating_the_sky() {
     let dir = write_beam_dir("axes");
-    // p -> North, q -> West, r -> Up.
+    // p -> North, q -> West, r -> Up: the station turned by -90 degrees in
+    // azimuth, so it sees at az what the unrotated station sees at az + 90.
     let axes = [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
-    let rotated = SkaLowBeam::new(
-        &dir.0,
-        offsets([[5.0, 0.0, 0.0]; N_ELEMENTS]).view(),
-        Some(axes),
-        false,
-    )
-    .unwrap();
-    // The same station described directly in East/North/Up.
-    let direct = SkaLowBeam::new(
-        &dir.0,
-        offsets([[0.0, 5.0, 0.0]; N_ELEMENTS]).view(),
-        None,
-        false,
-    )
-    .unwrap();
+    let station_offsets = offsets([[5.0, 1.0, 0.0], [-2.0, 3.0, 0.5], [0.0, -4.0, 0.0]]);
+    let rotated = SkaLowBeam::new(&dir.0, station_offsets.view(), Some(axes), false).unwrap();
+    // The same station, unturned; its station frame is (East, North, Up).
+    let unrotated = SkaLowBeam::new(&dir.0, station_offsets.view(), None, false).unwrap();
 
-    let azel = AzEl::from_radians(1.1, 0.9);
+    let (az, el) = (1.1, 0.9);
     let w = [c64::new(1.0, 0.0); N_ELEMENTS];
-    let a = rotated.calc_jones(azel, 100e6, &w, None, false).unwrap();
-    let b = direct.calc_jones(azel, 100e6, &w, None, false).unwrap();
+    let a = rotated
+        .calc_jones(AzEl::from_radians(az, el), 100e6, &w, None, false)
+        .unwrap();
+    let b = unrotated
+        .calc_jones(AzEl::from_radians(az + FRAC_PI_2, el), 100e6, &w, None, false)
+        .unwrap();
     for i in 0..4 {
         assert_abs_diff_eq!(a[i], b[i], epsilon = 1e-12);
     }
+    // ... and the rotation isn't a no-op.
+    let same_dir = unrotated
+        .calc_jones(AzEl::from_radians(az, el), 100e6, &w, None, false)
+        .unwrap();
+    assert!((0..4).any(|i| (a[i] - same_dir[i]).norm() > 1e-3));
 }
 
 #[test]
@@ -450,7 +450,7 @@ mod real_files {
 
         for format in [GridFormat::Npy, GridFormat::Npz] {
             let beam =
-                SkaLowBeam::new_from_grid(&dir, filebase, format, offsets.view(), None, 0.0, false)
+                SkaLowBeam::new_from_grid(&dir, filebase, format, offsets.view(), None, false)
                     .unwrap();
             assert_eq!(beam.get_freqs(), &[99e6]);
             let jones = beam.calc_jones(azel, 99e6, &weights, None, false).unwrap();

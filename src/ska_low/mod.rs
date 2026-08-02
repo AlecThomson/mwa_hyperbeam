@@ -16,6 +16,22 @@
 //! how one element is evaluated at one direction, so they are an enum rather
 //! than two beam types - everything downstream is shared.
 //!
+//! # Station orientation
+//!
+//! Both file formats are *station frame*: one set of files describes one
+//! station design and is used for every station in the telescope, so the
+//! element boresight is at station azimuth zero and no station's rotation can
+//! be baked in. Getting this backwards is expensive and invisible at the call
+//! site, hence this paragraph.
+//!
+//! So a rotated station rotates twice over: the element offsets into (East,
+//! North, Up), *and* the direction into the station frame before the element
+//! pattern is evaluated. Both come from `coordinate_axes`; EveryBeam does the
+//! same. The station rotation is the azimuth of the station's East-like `p`
+//! axis, and it is what `eep.py` calls `eep_rotation_deg` - it is derived here
+//! rather than passed in, because one scalar cannot describe an array of
+//! differently-rotated stations.
+//!
 //! # Polarisation convention
 //!
 //! Returned [`Jones`] matrices follow the same convention as the FEE beam. The
@@ -86,9 +102,6 @@ enum ElementSource {
     },
     Grid {
         files: GridFiles,
-        /// Rotation of the station, and therefore of the EEP azimuth axis
-        /// \[degrees\]. `eep_rotation_deg` in `eep.py`.
-        rotation_deg: f64,
         normalise: bool,
         tolerance_hz: f64,
         cache: RwLock<HashMap<u64, Arc<GriddedEeps>>>,
@@ -103,7 +116,6 @@ enum Prepared {
     },
     Grid {
         eeps: Arc<GriddedEeps>,
-        rotation_deg: f64,
     },
 }
 
@@ -137,6 +149,9 @@ pub struct SkaLowBeam {
     /// \[metres\], shape `(3, n_elements)`. Already rotated by the station's
     /// coordinate axes, if any were given.
     element_offsets: Array2<f64>,
+    /// The station's rotation about Up \[radians\], derived from the same
+    /// coordinate axes. See [`station_rotation`].
+    station_rotation_rad: f64,
 }
 
 impl SkaLowBeam {
@@ -149,7 +164,8 @@ impl SkaLowBeam {
     /// each row of `coordinate_axes` is one of the station's axes `(p, q, r)`
     /// expressed in (East, North, Up). This mirrors the `ELEMENT_OFFSET` and
     /// `COORDINATE_AXES` columns of the MSv3 `PHASED_ARRAY` subtable, which the
-    /// caller is expected to read.
+    /// caller is expected to read. The axes also orient the element patterns;
+    /// see the module documentation.
     ///
     /// Flagged elements are simply elements with a weight of zero; there is no
     /// separate flag concept here.
@@ -170,6 +186,7 @@ impl SkaLowBeam {
                 cache: RwLock::new(HashMap::new()),
             },
             element_offsets: place_elements(element_offsets, coordinate_axes)?,
+            station_rotation_rad: station_rotation(coordinate_axes),
         })
     }
 
@@ -181,19 +198,18 @@ impl SkaLowBeam {
     /// `HARP_SKALA41_randvogel_1m_256_elem_50ohm_99MHz_Ypol.npz` it is
     /// `"HARP_SKALA41_randvogel_1m_256_elem_50ohm_"`.
     ///
-    /// `rotation_deg` rotates the EEP azimuth axis with the station, as
-    /// `eep_rotation_deg` does in `eep.py`. `normalise` divides each element by
-    /// its power integral over the whole grid; see [`GriddedEeps::normalise`].
+    /// `normalise` divides each element by its power integral over the whole
+    /// grid; see [`GriddedEeps::normalise`].
     ///
-    /// `element_offsets` and `coordinate_axes` are as for [`SkaLowBeam::new`].
-    #[allow(clippy::too_many_arguments)]
+    /// `element_offsets` and `coordinate_axes` are as for [`SkaLowBeam::new`];
+    /// the EEP azimuth axis rotates with the station, as `eep_rotation_deg`
+    /// does in `eep.py`, but the rotation comes from `coordinate_axes`.
     pub fn new_from_grid<T: AsRef<Path>>(
         beam_dir: T,
         filebase: &str,
         format: GridFormat,
         element_offsets: ArrayView2<f64>,
         coordinate_axes: Option<[[f64; 3]; 3]>,
-        rotation_deg: f64,
         normalise: bool,
     ) -> Result<Self, InitSkaLowBeamError> {
         let files = GridFiles::new(beam_dir.as_ref(), filebase, format)?;
@@ -201,12 +217,12 @@ impl SkaLowBeam {
             freqs_hz: files.freqs_hz().collect(),
             source: ElementSource::Grid {
                 files,
-                rotation_deg,
                 normalise,
                 tolerance_hz: DEFAULT_GRID_TOLERANCE_HZ,
                 cache: RwLock::new(HashMap::new()),
             },
             element_offsets: place_elements(element_offsets, coordinate_axes)?,
+            station_rotation_rad: station_rotation(coordinate_axes),
         })
     }
 
@@ -335,8 +351,9 @@ impl SkaLowBeam {
         let za_rad = azel.za();
 
         // Convert azimuth to FEKO phi (East through North), as the FEE beam
-        // does. The Y feed is the X feed rotated by a quarter turn.
-        let phi_x = FRAC_PI_2 - az_rad;
+        // does, and into the station frame, in which the element patterns are
+        // described. The Y feed is the X feed rotated by a quarter turn.
+        let phi_x = FRAC_PI_2 - az_rad + self.station_rotation_rad;
         let phi = [phi_x, phi_x + FRAC_PI_2];
         let (root_n, mut workspace) = prepared.scratch();
 
@@ -364,9 +381,12 @@ impl SkaLowBeam {
                     *use_ticra_convention,
                     &mut workspace,
                 ),
-                Prepared::Grid { eeps, rotation_deg } => {
-                    eeps.element_pattern(element, az_rad, azel.el, *rotation_deg)
-                }
+                Prepared::Grid { eeps } => eeps.element_pattern(
+                    element,
+                    az_rad,
+                    azel.el,
+                    self.station_rotation_rad.to_degrees(),
+                ),
             };
             let offset = self.element_offsets.index_axis(Axis(1), element);
             let path = (0..3).map(|i| offset[i] * k[i]).sum::<f64>();
@@ -426,7 +446,6 @@ impl SkaLowBeam {
 
             ElementSource::Grid {
                 files,
-                rotation_deg,
                 normalise,
                 tolerance_hz,
                 cache,
@@ -452,10 +471,7 @@ impl SkaLowBeam {
                         e
                     }
                 };
-                Prepared::Grid {
-                    eeps,
-                    rotation_deg: *rotation_deg,
-                }
+                Prepared::Grid { eeps }
             }
         };
 
@@ -473,6 +489,20 @@ impl SkaLowBeam {
                 file: what.to_string(),
             })
         }
+    }
+}
+
+/// The station's rotation about Up \[radians\], from the same coordinate axes
+/// that place the elements.
+///
+/// `p` is the station's East-like axis, so an unrotated station has `p =
+/// (1, 0, 0)` and no rotation; turning the station by an azimuth `psi` (East
+/// through North, as `eep_rotation_deg` measures it) puts `p` at azimuth
+/// `psi + 90`, i.e. `p = (cos psi, -sin psi, 0)`.
+fn station_rotation(coordinate_axes: Option<[[f64; 3]; 3]>) -> f64 {
+    match coordinate_axes {
+        None => 0.0,
+        Some([p, _, _]) => (-p[1]).atan2(p[0]),
     }
 }
 

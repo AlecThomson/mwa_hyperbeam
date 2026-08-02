@@ -91,18 +91,17 @@ impl SkaLowBeam {
     /// `<filebase><freq>MHz_<X|Y>pol.npz`, `False` for
     /// `<filebase><freq>MHz_<X|Y>pol_<phi|theta>.npy`.
     ///
-    /// `rotation_deg` rotates the EEP azimuth axis with the station.
-    /// `normalise` divides each element by its power integral over the grid.
+    /// The EEP azimuth axis rotates with the station, as given by
+    /// `coordinate_axes`. `normalise` divides each element by its power
+    /// integral over the grid.
     #[staticmethod]
-    #[pyo3(signature = (beam_dir, filebase, element_offsets, npz=None, coordinate_axes=None, rotation_deg=None, normalise=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (beam_dir, filebase, element_offsets, npz=None, coordinate_axes=None, normalise=None))]
     fn from_grid(
         beam_dir: std::path::PathBuf,
         filebase: &str,
         element_offsets: PyReadonlyArray2<f64>,
         npz: Option<bool>,
         coordinate_axes: Option<PyReadonlyArray2<f64>>,
-        rotation_deg: Option<f64>,
         normalise: Option<bool>,
     ) -> PyResult<SkaLowBeam> {
         let (offsets, axes) = geometry(element_offsets, coordinate_axes)?;
@@ -118,7 +117,6 @@ impl SkaLowBeam {
                 format,
                 offsets.view(),
                 axes,
-                rotation_deg.unwrap_or(0.0),
                 normalise.unwrap_or(false),
             )?,
         })
