@@ -169,6 +169,108 @@ pub(crate) fn p1sin(n_max: u8, theta: f64) -> (Vec<f64>, Vec<f64>) {
     (p1sin_out, p1_out)
 }
 
+/// `sqrt(0..=2*n_max)`, the precomputed table `legendre_norm` indexes into.
+pub(crate) fn root_n_table(n_max: usize) -> Vec<f64> {
+    (0..=2 * n_max).map(|i| (i as f64).sqrt()).collect()
+}
+
+/// Computes fully-normalised associated Legendre functions, following the
+/// MATLAB `legendre` implementation with `normalize = "norm"`.
+///
+/// # Arguments
+///
+/// * `n` - the degree, which must be at least 1.
+/// * `cos_theta` - the point (x) at which to evaluate the Legendre function.
+/// * `sin_theta` - the complementary value, `sqrt(1 - x^2)`.
+/// * `root_n` - `sqrt(0..=2*n)`, from [`root_n_table`].
+/// * `y` - the output, of length at least `n + 1`; `y[m]` is the normalised
+///   `P_n^m(cos_theta)`.
+///
+// This function is a re-write of sdp_legendre_norm within
+// src/ska-sdp-func/math/sdp_legendre_polynomial.h of ska-sdp-func, which is
+// distributed under the BSD-3-Clause license by the SKA Organisation and the
+// University of Oxford. The strided (num_points, idx_point) output of the
+// original is dropped; here `y` is contiguous.
+#[allow(clippy::float_cmp)]
+pub(crate) fn legendre_norm(
+    n: usize,
+    cos_theta: f64,
+    sin_theta: f64,
+    root_n: &[f64],
+    y: &mut [f64],
+) {
+    let tol = f64::from(f32::MIN_POSITIVE).sqrt();
+    let root_n_plus_half = (n as f64 + 0.5).sqrt();
+    let twocot = if sin_theta > 0.0 {
+        -2.0 * cos_theta / sin_theta
+    } else {
+        0.0
+    };
+    let sn = if sin_theta == 0.0 {
+        0.0
+    } else {
+        let s = sin_theta.powi(n as i32);
+        if n % 2 == 0 {
+            s
+        } else {
+            -s
+        }
+    };
+
+    y[..=n].fill(0.0);
+
+    // Underflow branch: used only when cos_theta is very very close to 1.
+    if sin_theta > 0.0 && sn.abs() <= tol {
+        let tstart = f64::from(f32::EPSILON);
+        let v = 9.2 - tol.ln() / (n as f64 * sin_theta);
+        let w = 1.0 / v.ln();
+        let m1d = 1.0 + n as f64 * sin_theta * v * w * (1.0058 + w * (3.819 - w * 12.173));
+        let m1 = (m1d.floor() as isize).clamp(1, n as isize) as usize;
+        let sgn_m1 = if m1 % 2 == 1 { 1.0 } else { -1.0 };
+        let sgn_n1 = if (n + 1) % 2 == 1 { 1.0 } else { -1.0 };
+        y[m1 - 1] = if cos_theta < 0.0 {
+            sgn_n1 * tstart
+        } else {
+            sgn_m1 * tstart
+        };
+        let mut sumsq = tol;
+        for m in (0..m1 - 1).rev() {
+            let a = (m + 1) as f64 * twocot * y[m + 1];
+            let b = root_n[n + m + 2] * root_n[n - m - 1] * y[m + 2];
+            y[m] = (a - b) / (root_n[n + m + 1] * root_n[n - m]);
+            sumsq += y[m] * y[m];
+        }
+        let scale = 1.0 / (2.0 * sumsq - y[0] * y[0]).sqrt();
+        y[..=m1].iter_mut().for_each(|y| *y *= scale);
+    }
+
+    // Non-underflow branch.
+    if cos_theta != 1.0 && sn.abs() >= tol {
+        let mut c = 1.0;
+        for k in 1..=n {
+            c *= 1.0 - 1.0 / (2.0 * k as f64);
+        }
+        y[n] = c.sqrt() * sn;
+        y[n - 1] = y[n] * twocot * n as f64 / root_n[2 * n];
+
+        for m in (0..n.saturating_sub(1)).rev() {
+            let a = (m + 1) as f64 * twocot * y[m + 1];
+            let b = root_n[n + m + 2] * root_n[n - m - 1] * y[m + 2];
+            y[m] = (a - b) / (root_n[n + m + 1] * root_n[n - m]);
+        }
+    }
+
+    // Polar case (cos_theta == +/- 1).
+    if sin_theta == 0.0 {
+        y[0] = cos_theta.powi(n as i32);
+    }
+
+    y[..=n].iter_mut().enumerate().for_each(|(m, y)| {
+        let sgn = if m % 2 == 0 { 1.0 } else { -1.0 };
+        *y *= root_n_plus_half * sgn;
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_4};
@@ -234,6 +336,104 @@ mod tests {
             0.000000, 0.000000, 1.928260, -1.875000, 1.928260, 0.000000,
         ];
         assert_abs_diff_eq!(result, expected, epsilon = 1e-6);
+    }
+
+    // Expected values from sdp_legendre_norm in ska-sdp-func, compiled and run
+    // over the same inputs.
+    fn check_legendre_norm(n: usize, theta: f64, expected: &[f64]) {
+        let mut y = vec![0.0; n + 1];
+        let (sin_theta, cos_theta) = theta.sin_cos();
+        legendre_norm(n, cos_theta, sin_theta, &root_n_table(n), &mut y);
+        assert_abs_diff_eq!(
+            Array1::from(y),
+            Array1::from(expected.to_vec()),
+            epsilon = 1e-12
+        );
+    }
+
+    #[test]
+    fn legendre_norm_n1() {
+        check_legendre_norm(1, 0.7, &[0.936_736_546_300_602_4, 0.557_908_882_715_098_6]);
+    }
+
+    #[test]
+    fn legendre_norm_n4() {
+        check_legendre_norm(
+            4,
+            0.7,
+            &[
+                -0.682_085_334_814_557_4,
+                0.639_741_100_234_545_7,
+                1.0770257203098461,
+                0.641_578_874_944_802,
+                0.191_058_283_520_412_2,
+            ],
+        );
+    }
+
+    #[test]
+    fn legendre_norm_n8() {
+        check_legendre_norm(
+            8,
+            1.234,
+            &[
+                -0.789_955_190_511_052_8,
+                -0.23884092441762633,
+                0.781_170_135_463_941_7,
+                0.380_642_086_730_243_9,
+                -0.716_062_501_501_500_4,
+                -0.687_023_551_522_400_1,
+                0.42558107842215626,
+                1.139364905679676,
+                0.8135150420097278,
+            ],
+        );
+    }
+
+    #[test]
+    fn legendre_norm_obtuse() {
+        check_legendre_norm(
+            8,
+            3.0,
+            &[
+                1.9537801460512567,
+                -1.456_266_908_426_77,
+                0.460_615_529_002_849_5,
+                -0.091_251_902_181_680_49,
+                0.012764396511760562,
+                -0.0013215075762835816,
+                0.00010210587746311471,
+                -5.702_572_474_257_961e-6,
+                2.032204982090008e-07,
+            ],
+        );
+    }
+
+    // sin_theta is tiny but non-zero, so sin_theta^n underflows.
+    #[test]
+    fn legendre_norm_underflow_branch() {
+        let mut expected = vec![0.0; 17];
+        expected[0] = 4.062_019_202_315_218;
+        expected[1] = 3.349_626_844_887_709e-6;
+        expected[2] = 1.375999636627549e-12;
+        expected[3] = 3.740312486944613e-19;
+        check_legendre_norm(16, 1e-7, &expected);
+    }
+
+    // theta = pi doesn't give sin_theta == 0, so this is the underflow branch
+    // with cos_theta < 0.
+    #[test]
+    fn legendre_norm_pi() {
+        let mut expected = vec![0.0; 9];
+        expected[0] = 2.9154759474226504;
+        check_legendre_norm(8, std::f64::consts::PI, &expected);
+    }
+
+    #[test]
+    fn legendre_norm_polar() {
+        let mut expected = vec![0.0; 9];
+        expected[0] = 2.9154759474226504;
+        check_legendre_norm(8, 0.0, &expected);
     }
 
     #[test]
