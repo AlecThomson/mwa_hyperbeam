@@ -50,7 +50,7 @@ fn write_jones(j: &Jones<f64>, out: &mut [f64]) {
 }
 
 fn write_jones_array(js: &[Jones<f64>], out: &mut [f64]) {
-    for (j, o) in js.iter().zip(out.chunks_exact_mut(8)) {
+    for (j, o) in js.iter().zip(out.as_chunks_mut::<8>().0) {
         write_jones(j, o);
     }
 }
@@ -364,9 +364,9 @@ pub unsafe extern "C" fn ska_low_calc_station_jones_array(
     let beam = &*ska_low_beam;
     let ne = num_elements as usize;
     let positions = slice::from_raw_parts(positions_enu, 3 * ne)
-        .chunks_exact(3)
-        .map(|p| [p[0], p[1], p[2]])
-        .collect();
+        .as_chunks::<3>()
+        .0
+        .to_vec();
     let weights = if weights.is_null() {
         None
     } else {
@@ -534,7 +534,7 @@ pub unsafe extern "C" fn ska_low_calc_jones_gpu(
         iau_order,
     ));
     let out = slice::from_raw_parts_mut(jones, results.len() * 8);
-    for (j, o) in results.iter().zip(out.chunks_exact_mut(8)) {
+    for (j, o) in results.iter().zip(out.as_chunks_mut::<8>().0) {
         for k in 0..4 {
             o[2 * k] = j[k].re;
             o[2 * k + 1] = j[k].im;

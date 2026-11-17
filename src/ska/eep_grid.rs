@@ -135,7 +135,7 @@ impl SkaLowEepGrid {
         let buffer: Vec<f64> = dataset.read_raw()?;
         let (np, nt, nf) = (phis.len(), thetas.len(), freqs.len());
         let mut grid = vec![[c64::default(); 4]; np * nt * nf];
-        for (i_file, b) in buffer.chunks_exact(8).enumerate() {
+        for (i_file, b) in buffer.as_chunks::<8>().0.iter().enumerate() {
             let (p, rest) = (i_file / (nt * nf), i_file % (nt * nf));
             let (t, f) = (rest / nf, rest % nf);
             // The file stores [J01, J00, J11, J10] (EveryBeam's phi/theta
