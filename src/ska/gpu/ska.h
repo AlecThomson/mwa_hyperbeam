@@ -63,17 +63,19 @@ typedef struct SkaGpuModel {
 /// or element 0 for all if NULL) or a station of `num_station_elements`
 /// elements (positions [tile][element][ENU] in metres and weights
 /// [tile][element]). Station tiles are pointed at (`pointing_az`,
-/// `pointing_za`). If `d_latitude_rad` is not NULL, the parallactic-angle
-/// correction is applied.
+/// `pointing_za`). If `d_rotations` is not NULL, it gives each tile's rotation
+/// about the local vertical [radians, the angle of its X dipoles from East
+/// towards North]; elements are then evaluated at phi - rotation. If
+/// `d_latitude_rad` is not NULL, the parallactic-angle correction is applied.
 ///
 /// Directions outside the model's domain (e.g. outside an EEP grid) give zero
 /// responses.
 const char *gpu_ska_calc_jones(const SkaGpuModel *model, const FLOAT *d_azs, const FLOAT *d_zas,
                                const int num_directions, const FLOAT *d_freqs_hz, const int num_freqs,
                                const int num_tiles, const int *d_element_ids, const int num_station_elements,
-                               const FLOAT *d_positions, const FLOAT *d_weights, const FLOAT pointing_az,
-                               const FLOAT pointing_za, const FLOAT *d_latitude_rad, const int iau_order,
-                               void *d_results);
+                               const FLOAT *d_positions, const FLOAT *d_weights, const FLOAT *d_rotations,
+                               const FLOAT pointing_az, const FLOAT pointing_za, const FLOAT *d_latitude_rad,
+                               const int iau_order, void *d_results);
 
 #ifdef __cplusplus
 } // extern "C"
@@ -392,8 +394,8 @@ inline __device__ void ska_apply_pa_correction(JONES *jm, FLOAT pa, int iau_orde
 __global__ void ska_kernel(const SkaGpuModel model, const FLOAT *azs, const FLOAT *zas, const int num_directions,
                            const FLOAT *freqs_hz, const int num_freqs, const int num_tiles, const int *element_ids,
                            const int num_station_elements, const FLOAT *positions, const FLOAT *weights,
-                           const FLOAT pointing_az, const FLOAT pointing_za, const FLOAT *latitude_rad,
-                           const int iau_order, JONES *results) {
+                           const FLOAT *rotations, const FLOAT pointing_az, const FLOAT pointing_za,
+                           const FLOAT *latitude_rad, const int iau_order, JONES *results) {
     for (int i_dir = blockIdx.x * blockDim.x + threadIdx.x; i_dir < num_directions;
          i_dir += gridDim.x * blockDim.x) {
         const FLOAT az = azs[i_dir];
@@ -423,21 +425,30 @@ __global__ void ska_kernel(const SkaGpuModel model, const FLOAT *azs, const FLOA
             const FLOAT k = -M_2PI * freq / VEL_C;
 
             // For models whose elements are all identical, the element
-            // response only needs to be evaluated once per direction.
-            JONES shared_element;
-            int shared_ok = 0;
+            // response only needs to be evaluated once per direction (for
+            // unrotated tiles).
+            JONES unrotated_element;
+            int unrotated_ok = 0;
             if (model.model != SKA_EEP_SPH) {
-                shared_ok = ska_element_response(&model, i_freq, freq, 0, za, phi, &shared_element);
+                unrotated_ok = ska_element_response(&model, i_freq, freq, 0, za, phi, &unrotated_element);
             }
 
             for (int i_tile = 0; i_tile < num_tiles; i_tile++) {
                 JONES j = ska_zero_jones();
                 int ok = 1;
+                // The direction's phi in the tile's (rotated) frame.
+                const FLOAT rotation = rotations != NULL ? rotations[i_tile] : 0.0;
+                const FLOAT tile_phi = phi - rotation;
+                JONES shared_element = unrotated_element;
+                int shared_ok = unrotated_ok;
+                if (model.model != SKA_EEP_SPH && rotation != 0.0) {
+                    shared_ok = ska_element_response(&model, i_freq, freq, 0, za, tile_phi, &shared_element);
+                }
                 if (positions == NULL) {
                     // Single element.
                     if (model.model == SKA_EEP_SPH) {
                         const int element_id = element_ids != NULL ? element_ids[i_tile] : 0;
-                        j = ska_sph_response(&model, i_freq, element_id, za, phi);
+                        j = ska_sph_response(&model, i_freq, element_id, za, tile_phi);
                     } else {
                         ok = shared_ok;
                         j = shared_element;
@@ -457,7 +468,7 @@ __global__ void ska_kernel(const SkaGpuModel model, const FLOAT *azs, const FLOA
                                &c_ph);
                         const COMPLEX phasor = MAKE_COMPLEX(c_ph * w[e], s_ph * w[e]);
                         if (model.model == SKA_EEP_SPH) {
-                            const JONES el = ska_sph_response(&model, i_freq, e, za, phi);
+                            const JONES el = ska_sph_response(&model, i_freq, e, za, tile_phi);
                             ska_add_scaled(&j, &el, phasor);
                         } else {
                             af += phasor;

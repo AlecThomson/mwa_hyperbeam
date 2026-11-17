@@ -735,3 +735,116 @@ fn eep_array_path_matches_single_path() {
             .is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Station rotation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rotation_from_p_axis_values() {
+    assert_abs_diff_eq!(super::rotation_from_p_axis([1.0, 0.0, 0.0]), 0.0);
+    assert_abs_diff_eq!(super::rotation_from_p_axis([0.0, 1.0, 0.0]), FRAC_PI_2);
+    assert_abs_diff_eq!(super::rotation_from_p_axis([-1.0, 0.0, 0.1]), PI);
+    let a = 0.7_f64;
+    assert_abs_diff_eq!(super::rotation_from_p_axis([a.cos(), a.sin(), 0.0]), a);
+}
+
+#[test]
+fn rotated_station_matches_everybeam_projection() {
+    // EveryBeam evaluates OSKAR element responses in each station's
+    // (p, q, r) frame: theta/phi come from projecting the direction onto the
+    // station axes. A station rotated by alpha has p = (cos a, sin a, 0) and
+    // q = (-sin a, cos a, 0) in ENU.
+    let dir = write_feko_dir("rotated_station", &[100.0], 3, 3);
+    let feko = SkaLowEepSph::new(&dir.0).unwrap();
+    let positions = vec![[1.0, 2.0, 0.0], [-3.0, 0.5, 0.1], [0.2, -1.7, 0.0]];
+    let weights = vec![1.0, 0.7, 1.3];
+    let (paz, pza, freq): (f64, f64, f64) = (0.4, 0.3, 100e6);
+    for alpha in [0.0_f64, 0.3, 1.9, -2.5] {
+        let station = SkaStation::new(&feko, positions.clone(), Some(weights.clone()))
+            .unwrap()
+            .with_rotation(alpha);
+        let (p, q) = (
+            [alpha.cos(), alpha.sin(), 0.0],
+            [-alpha.sin(), alpha.cos(), 0.0],
+        );
+        for (az, za) in [(0.1_f64, 0.2_f64), (2.0, 0.9), (4.5, 1.3)] {
+            let d = [za.sin() * az.sin(), za.sin() * az.cos(), za.cos()];
+            let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            let (x, y, z) = (dot(p, d), dot(q, d), d[2]);
+            let theta_local = FRAC_PI_2 - z.atan2(x.hypot(y));
+            let phi_local = y.atan2(x);
+
+            let s0 = [pza.sin() * paz.sin(), pza.sin() * paz.cos(), pza.cos()];
+            let k = TAU * freq / marlu::constants::VEL_C;
+            let mut expected = Jones::default();
+            for (i, (r, w)) in positions.iter().zip(&weights).enumerate() {
+                let phase =
+                    -k * ((s0[0] - d[0]) * r[0] + (s0[1] - d[1]) * r[1] + (s0[2] - d[2]) * r[2]);
+                let e = feko
+                    .element_response(i, freq, theta_local, phi_local)
+                    .unwrap();
+                expected += e * (c64::cis(phase) * *w);
+            }
+            expected /= weights.iter().sum::<f64>();
+
+            let got = station.station_response(az, za, freq, paz, pza).unwrap();
+            assert_abs_diff_eq!(got, expected, epsilon = 1e-10);
+        }
+    }
+}
+
+#[test]
+fn rotating_by_90_degrees_swaps_dipoles() {
+    // Rotating a station by +90 deg puts its X dipoles along the N-S line
+    // (where the unrotated Y dipoles were) and its Y dipoles along the E-W
+    // line. A dipole's sign is a convention: OSKAR/EveryBeam define the Y
+    // dipole as the X pattern evaluated at phi + 90 deg, so the rotated X is
+    // -(unrotated Y) and the rotated Y is +(unrotated X). (Consequently a
+    // station rotated by 180 deg has an overall sign flip, as in EveryBeam.)
+    // A single element at the origin has an array factor of 1.
+    let model = SkaLowAnalytic::new();
+    let unrotated = SkaStation::new(&model, vec![[0.0; 3]], None).unwrap();
+    let rotated = SkaStation::new(&model, vec![[0.0; 3]], None)
+        .unwrap()
+        .with_rotation(FRAC_PI_2);
+    for (az, za) in [(0.3_f64, 0.4_f64), (2.2, 1.1), (5.0, 0.05)] {
+        for lat in [None, Some(-0.4660608448386394)] {
+            let u = unrotated
+                .calc_jones_pair(az, za, 1.2e8, 0.0, 0.0, lat, false)
+                .unwrap();
+            let r = rotated
+                .calc_jones_pair(az, za, 1.2e8, 0.0, 0.0, lat, false)
+                .unwrap();
+            assert_abs_diff_eq!(r[0], -u[2], epsilon = 1e-12);
+            assert_abs_diff_eq!(r[1], -u[3], epsilon = 1e-12);
+            assert_abs_diff_eq!(r[2], u[0], epsilon = 1e-12);
+            assert_abs_diff_eq!(r[3], u[1], epsilon = 1e-12);
+        }
+    }
+}
+
+#[test]
+fn rotated_eep_grid_station() {
+    // For identical elements, a rotated station is the array factor times the
+    // element response evaluated at phi - rotation.
+    let phis: Vec<f64> = (0..=72).map(|i| i as f64 * TAU / 72.0).collect();
+    let thetas: Vec<f64> = (0..=18).map(|i| i as f64 * FRAC_PI_2 / 18.0).collect();
+    let file = write_eep("rotated_eep_grid.h5", &phis, &thetas, &[50e6, 350e6]);
+    let eep = SkaLowEepGrid::new(&file.0).unwrap();
+    let positions = vec![[1.0, 2.0, 0.0], [-3.0, 0.5, 0.0]];
+    let alpha = 0.83;
+    let station = SkaStation::new(&eep, positions.clone(), None)
+        .unwrap()
+        .with_rotation(alpha);
+    let (az, za, f) = (1.3, 0.7, 1.5e8);
+    let af = station.array_factor(az, za, f, 0.0, 0.0);
+    let e = eep
+        .element_response(0, f, za, FRAC_PI_2 - az - alpha)
+        .unwrap();
+    assert_abs_diff_eq!(
+        station.station_response(az, za, f, 0.0, 0.0).unwrap(),
+        e * af,
+        epsilon = 1e-12
+    );
+}

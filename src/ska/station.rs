@@ -25,12 +25,40 @@ use super::{az_to_phi, everybeam_to_hyperbeam, par_map_jones, SkaBeamError, SkaE
 /// to any origin; the station centre is conventional). Only the relative
 /// geometry matters, apart from an overall phase.
 ///
+/// # Station rotation
+///
+/// SKA-Low stations may be rigidly rotated about the local vertical. In a
+/// station rotated by `rotation_rad` (see [`SkaStation::with_rotation`]), the
+/// X dipoles lie along the station's first axis, `rotation_rad` from East
+/// towards North (counter-clockwise seen from above), and the Y dipoles
+/// `rotation_rad` from North towards West; the element patterns (including
+/// EEP grids and FEKO patterns, which are defined in the station's frame) are
+/// rotated with them. This matches EveryBeam, which evaluates OSKAR element
+/// responses in each station's `COORDINATE_AXES` frame (from the MS
+/// `PHASED_ARRAY` table); use [`rotation_from_p_axis`] to get the angle from
+/// those axes. Element positions are still given in East, North, Up.
+///
+/// The output Jones matrices keep hyperbeam's convention: the columns are
+/// still the theta and azimuth components on the sky, and the rows are the
+/// station's (rotated) X and Y dipoles.
+///
 /// [`SkaLowEepGrid`]: super::SkaLowEepGrid
 /// [`SkaLowAnalytic`]: super::SkaLowAnalytic
 pub struct SkaStation<E: SkaElementResponse> {
     element: E,
     positions_enu: Vec<[f64; 3]>,
     weights: Vec<f64>,
+    rotation_rad: f64,
+}
+
+/// Get a station's rotation angle (as used by [`SkaStation::with_rotation`])
+/// from its first coordinate axis (`p`, the X-dipole direction) expressed in
+/// the station's local East, North, Up frame. For an MS, `p` is the first row
+/// of the station's `COORDINATE_AXES` in the `PHASED_ARRAY` table, which is in
+/// ITRF; project it onto the station's local East and North unit vectors
+/// first. Any vertical component of `p` is ignored.
+pub fn rotation_from_p_axis(p_enu: [f64; 3]) -> f64 {
+    p_enu[1].atan2(p_enu[0])
 }
 
 /// Unit vector (East, North, Up) for an azimuth and zenith angle.
@@ -79,7 +107,22 @@ impl<E: SkaElementResponse> SkaStation<E> {
             element,
             positions_enu,
             weights,
+            rotation_rad: 0.0,
         })
+    }
+
+    /// Set the station's rotation about the local vertical: the angle of its
+    /// X dipoles from East towards North \[radians\]. See the
+    /// [type-level documentation](SkaStation#station-rotation).
+    pub fn with_rotation(mut self, rotation_rad: f64) -> SkaStation<E> {
+        self.rotation_rad = rotation_rad;
+        self
+    }
+
+    /// The station's rotation (the angle of its X dipoles from East towards
+    /// North) \[radians\].
+    pub fn rotation(&self) -> f64 {
+        self.rotation_rad
     }
 
     /// The element-response model of this station.
@@ -132,7 +175,8 @@ impl<E: SkaElementResponse> SkaStation<E> {
         pointing_az_rad: f64,
         pointing_za_rad: f64,
     ) -> Result<Jones<f64>, SkaBeamError> {
-        let phi = az_to_phi(az_rad);
+        // The direction's phi in the station's (rotated) frame.
+        let phi = az_to_phi(az_rad) - self.rotation_rad;
         if self.element.num_elements().is_none() {
             let af = self.array_factor(az_rad, za_rad, freq_hz, pointing_az_rad, pointing_za_rad);
             let e = self.element.element_response(0, freq_hz, za_rad, phi)?;

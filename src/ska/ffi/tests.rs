@@ -86,6 +86,7 @@ fn ffi_analytic_matches_rust() {
                 3,
                 positions.as_ptr(),
                 null(),
+                0.0,
                 1,
                 [0.7].as_ptr(),
                 [0.4].as_ptr(),
@@ -139,6 +140,7 @@ fn ffi_errors() {
                 2,
                 positions.as_ptr(),
                 weights.as_ptr(),
+                0.0,
                 1,
                 [0.0].as_ptr(),
                 [0.1].as_ptr(),
@@ -154,5 +156,50 @@ fn ffi_errors() {
         assert!(last_error().contains("flagged"));
         free_ska_low_beam(beam);
         free_ska_low_beam(std::ptr::null_mut());
+    }
+}
+
+#[test]
+fn ffi_rotated_station_matches_rust() {
+    unsafe {
+        let mut beam: *mut SkaLowBeam = std::ptr::null_mut();
+        assert_eq!(new_ska_low_analytic_beam(1, &mut beam), 0);
+        let positions = [-1.0, 0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 2.0, 0.1];
+        let (az, za) = ([0.3, 2.1], [0.4, 1.0]);
+        let lat = -0.4660608448386394;
+        let rotation = 0.83;
+        let mut jones = [0.0; 16];
+        assert_eq!(
+            ska_low_calc_station_jones_array(
+                beam,
+                3,
+                positions.as_ptr(),
+                null(),
+                rotation,
+                2,
+                az.as_ptr(),
+                za.as_ptr(),
+                1.2e8,
+                0.5,
+                0.2,
+                &lat,
+                1,
+                jones.as_mut_ptr()
+            ),
+            0
+        );
+        let station = SkaStation::new(&*beam, positions.as_chunks::<3>().0.to_vec(), None)
+            .unwrap()
+            .with_rotation(rotation);
+        for i in 0..2 {
+            let e = station
+                .calc_jones_pair(az[i], za[i], 1.2e8, 0.5, 0.2, Some(lat), true)
+                .unwrap();
+            for k in 0..4 {
+                assert_abs_diff_eq!(jones[8 * i + 2 * k], e[k].re);
+                assert_abs_diff_eq!(jones[8 * i + 2 * k + 1], e[k].im);
+            }
+        }
+        free_ska_low_beam(beam);
     }
 }

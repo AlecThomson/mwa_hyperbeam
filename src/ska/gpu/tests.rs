@@ -81,6 +81,18 @@ fn check_elements(beam: &SkaLowBeam, freqs: &[f64], element_ids: &[usize]) {
 
 /// Compare station-mode GPU results against the CPU.
 fn check_stations(beam: &SkaLowBeam, freqs: &[f64], num_elements: usize) {
+    // Unrotated stations, and two stations with different rotations (one of
+    // them zero, which takes a different code path in the kernel).
+    check_stations_inner(beam, freqs, num_elements, None);
+    check_stations_inner(beam, freqs, num_elements, Some(&[0.0, 1.234]));
+}
+
+fn check_stations_inner(
+    beam: &SkaLowBeam,
+    freqs: &[f64],
+    num_elements: usize,
+    rotations: Option<&[f64]>,
+) {
     let (az, za) = directions();
     let num_stations = 2;
     let positions = Array3::from_shape_fn((num_stations, num_elements, 3), |(s, e, d)| {
@@ -102,6 +114,7 @@ fn check_stations(beam: &SkaLowBeam, freqs: &[f64], num_elements: usize) {
             SkaGpuTiles::Stations {
                 positions_enu: positions.view(),
                 weights: Some(weights.view()),
+                rotations_rad: rotations,
             },
         )
     }
@@ -117,8 +130,9 @@ fn check_stations(beam: &SkaLowBeam, freqs: &[f64], num_elements: usize) {
             .outer_iter()
             .map(|p| [p[0], p[1], p[2]])
             .collect();
-        let station =
-            SkaStation::new(beam, pos, Some(weights.slice(s![i_station, ..]).to_vec())).unwrap();
+        let station = SkaStation::new(beam, pos, Some(weights.slice(s![i_station, ..]).to_vec()))
+            .unwrap()
+            .with_rotation(rotations.map(|r| r[i_station]).unwrap_or(0.0));
         for (i_freq, &f) in freqs.iter().enumerate() {
             let cpu = station
                 .calc_jones_array_pair(

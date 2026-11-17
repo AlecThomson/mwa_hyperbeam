@@ -135,10 +135,14 @@ macro_rules! ska_py_class {
             /// given a pointing and the station's element positions
             /// (`positions_enu`, shape (N_elements, 3), East/North/Up in
             /// metres). Optional `weights` (one per element; 0 flags an
-            /// element) default to 1. For models with per-element patterns,
-            /// element i uses element_id i. Returns shape (N, 4); see
-            /// `calc_jones` for the output convention.
-            #[pyo3(signature = (az_rad, za_rad, freq_hz, pointing_az_rad, pointing_za_rad, positions_enu, weights=None, latitude_rad=None, iau_order=None))]
+            /// element) default to 1. `rotation_rad` is the station's
+            /// rotation about the local vertical: the angle of its X dipoles
+            /// from East towards North (SKA-Low stations are rigidly rotated;
+            /// see the COORDINATE_AXES of the MS PHASED_ARRAY table). For
+            /// models with per-element patterns, element i uses element_id i.
+            /// Returns shape (N, 4); see `calc_jones` for the output
+            /// convention.
+            #[pyo3(signature = (az_rad, za_rad, freq_hz, pointing_az_rad, pointing_za_rad, positions_enu, weights=None, rotation_rad=0.0, latitude_rad=None, iau_order=None))]
             #[allow(clippy::too_many_arguments)]
             fn calc_station_jones_array<'py>(
                 &self,
@@ -150,6 +154,7 @@ macro_rules! ska_py_class {
                 pointing_za_rad: f64,
                 positions_enu: PyReadonlyArray2<f64>,
                 weights: Option<Vec<f64>>,
+                rotation_rad: f64,
                 latitude_rad: Option<f64>,
                 iau_order: Option<bool>,
             ) -> PyResult<Bound<'py, PyArray2<c64>>> {
@@ -170,7 +175,7 @@ macro_rules! ska_py_class {
                     .outer_iter()
                     .map(|r| [r[0], r[1], r[2]])
                     .collect();
-                let station = SkaStation::new(&self.beam, positions, weights)?;
+                let station = SkaStation::new(&self.beam, positions, weights)?.with_rotation(rotation_rad);
                 let js = py.detach(|| {
                     station.calc_jones_array_pair(
                         &az_rad,

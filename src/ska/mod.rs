@@ -28,7 +28,9 @@
 //!
 //! [`SkaStation`] combines any of these element models with an array factor
 //! to produce a station (tile) beam, in the same way as EveryBeam's OSKAR
-//! telescope does.
+//! telescope does, including each station's rigid rotation about the local
+//! vertical ([`SkaStation::with_rotation`]; EveryBeam takes this from the
+//! `COORDINATE_AXES` of the MS `PHASED_ARRAY` table).
 
 mod analytic;
 mod beam;
@@ -49,7 +51,7 @@ pub use eep_sph::SkaLowEepSph;
 pub use error::{InitSkaBeamError, SkaBeamError};
 #[cfg(any(feature = "cuda", feature = "hip"))]
 pub use gpu::{SkaGpuTiles, SkaLowBeamGpu, SKA_GPU_MAX_L_MAX};
-pub use station::SkaStation;
+pub use station::{rotation_from_p_axis, SkaStation};
 
 use std::f64::consts::FRAC_PI_2;
 

@@ -325,6 +325,9 @@ pub unsafe extern "C" fn ska_low_element_response(
 ///   for each element.
 /// * `weights` - `num_elements` doubles (0 flags an element), or null for all
 ///   ones.
+/// * `rotation_rad` - The station's rotation about the local vertical: the
+///   angle of its X dipoles from East towards North \[radians\]. SKA-Low
+///   stations are rigidly rotated; use 0 for an unrotated station.
 /// * `num_azza` - The number of directions in `az_rad` and `za_rad`.
 /// * `az_rad` - The azimuths (North through East) \[radians\].
 /// * `za_rad` - The zenith angles \[radians\].
@@ -350,6 +353,7 @@ pub unsafe extern "C" fn ska_low_calc_station_jones_array(
     num_elements: u32,
     positions_enu: *const f64,
     weights: *const f64,
+    rotation_rad: f64,
     num_azza: u32,
     az_rad: *const f64,
     za_rad: *const f64,
@@ -372,7 +376,7 @@ pub unsafe extern "C" fn ska_low_calc_station_jones_array(
     } else {
         Some(slice::from_raw_parts(weights, ne).to_vec())
     };
-    let station = ffi_error!(SkaStation::new(beam, positions, weights));
+    let station = ffi_error!(SkaStation::new(beam, positions, weights)).with_rotation(rotation_rad);
     let n = num_azza as usize;
     let js = ffi_error!(station.calc_jones_array_pair(
         slice::from_raw_parts(az_rad, n),
@@ -429,6 +433,9 @@ cfg_if::cfg_if! {
 ///   station-major).
 /// * `weights` - If not null (and `positions_enu` is not null),
 ///   `num_station_elements * num_tiles` element weights (0 flags an element).
+/// * `rotations_rad` - If not null (and `positions_enu` is not null),
+///   `num_tiles` station rotations about the local vertical (the angle of each
+///   station's X dipoles from East towards North \[radians\]).
 /// * `gpu_ska_low_beam` - a double pointer to the `SkaLowBeamGpu` struct which
 ///   is set by this function. This struct must be freed by calling
 ///   `free_gpu_ska_low_beam`.
@@ -451,6 +458,7 @@ pub unsafe extern "C" fn new_gpu_ska_low_beam(
     num_station_elements: u32,
     positions_enu: *const f64,
     weights: *const f64,
+    rotations_rad: *const f64,
     gpu_ska_low_beam: *mut *mut SkaLowBeamGpu,
 ) -> i32 {
     let beam = &*ska_low_beam;
@@ -474,6 +482,11 @@ pub unsafe extern "C" fn new_gpu_ska_low_beam(
                 None
             } else {
                 Some(ArrayView2::from_shape_ptr((nt, ne), weights))
+            },
+            rotations_rad: if rotations_rad.is_null() {
+                None
+            } else {
+                Some(slice::from_raw_parts(rotations_rad, nt))
             },
         }
     };

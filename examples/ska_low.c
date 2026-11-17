@@ -70,9 +70,12 @@ int main(int argc, char *argv[]) {
         handle_hyperbeam_error(__FILE__, __LINE__, "ska_low_calc_jones_array");
     printf("Direction 999 XX: %+.6f%+.6fi\n", jones_array[8 * 999], jones_array[8 * 999 + 1]);
 
-    // A station beam: a 4x4 grid of elements 1.5 m apart, pointed at zenith.
-    // (For ska-low-eep-sph, the number of positions must match the number of
-    // elements in the coefficient files.)
+    // A station beam: a 4x4 grid of elements 1.5 m apart, pointed at zenith,
+    // with the station rotated by 30 degrees (its X dipoles are 30 degrees
+    // from East towards North; SKA-Low stations are rigidly rotated, see the
+    // COORDINATE_AXES of the MS PHASED_ARRAY table). (For ska-low-eep-sph, the
+    // number of positions must match the number of elements in the
+    // coefficient files.)
     if (num_elements == 0) {
         int n_el = 16;
         double positions[3 * 16];
@@ -81,8 +84,9 @@ int main(int argc, char *argv[]) {
             positions[3 * i + 1] = 1.5 * (i / 4) - 2.25;
             positions[3 * i + 2] = 0.0;
         }
-        if (ska_low_calc_station_jones_array(beam, n_el, positions, NULL, num_directions, az, za, freq_hz, 0.0, 0.0,
-                                             &latitude_rad, 1, jones_array))
+        double rotation_rad = 30.0 * M_PI / 180.0;
+        if (ska_low_calc_station_jones_array(beam, n_el, positions, NULL, rotation_rad, num_directions, az, za, freq_hz,
+                                             0.0, 0.0, &latitude_rad, 1, jones_array))
             handle_hyperbeam_error(__FILE__, __LINE__, "ska_low_calc_station_jones_array");
         printf("Station beam, direction 0 XX: %+.6f%+.6fi\n", jones_array[0], jones_array[1]);
         printf("Station beam, direction 999 XX: %+.6f%+.6fi\n", jones_array[8 * 999], jones_array[8 * 999 + 1]);
