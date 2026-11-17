@@ -76,6 +76,24 @@ pub(crate) fn everybeam_to_hyperbeam(
     jones
 }
 
+/// Evaluate `f(i)` for `i` in `0..n` in parallel into a pre-allocated vector,
+/// stopping at the first error. (This is considerably faster than collecting
+/// an iterator of `Result`s with rayon.)
+pub(crate) fn par_map_jones<F>(n: usize, f: F) -> Result<Vec<Jones<f64>>, SkaBeamError>
+where
+    F: Fn(usize) -> Result<Jones<f64>, SkaBeamError> + Sync + Send,
+{
+    let mut out = vec![Jones::default(); n];
+    out.par_iter_mut()
+        .enumerate()
+        .with_min_len(256)
+        .try_for_each(|(i, o)| {
+            *o = f(i)?;
+            Ok::<(), SkaBeamError>(())
+        })?;
+    Ok(out)
+}
+
 /// An SKA-Low element-response model.
 ///
 /// Only [`element_response`](Self::element_response) needs to be implemented;
@@ -158,10 +176,9 @@ pub trait SkaElementResponse: Sync {
         latitude_rad: Option<f64>,
         iau_order: bool,
     ) -> Result<Vec<Jones<f64>>, SkaBeamError> {
-        azels
-            .par_iter()
-            .map(|azel| self.calc_jones(*azel, freq_hz, element_id, latitude_rad, iau_order))
-            .collect()
+        par_map_jones(azels.len(), |i| {
+            self.calc_jones(azels[i], freq_hz, element_id, latitude_rad, iau_order)
+        })
     }
 
     /// Calculate element-response Jones matrices for many directions in
@@ -175,13 +192,16 @@ pub trait SkaElementResponse: Sync {
         latitude_rad: Option<f64>,
         iau_order: bool,
     ) -> Result<Vec<Jones<f64>>, SkaBeamError> {
-        az_rad
-            .par_iter()
-            .zip(za_rad.par_iter())
-            .map(|(&az, &za)| {
-                self.calc_jones_pair(az, za, freq_hz, element_id, latitude_rad, iau_order)
-            })
-            .collect()
+        par_map_jones(az_rad.len().min(za_rad.len()), |i| {
+            self.calc_jones_pair(
+                az_rad[i],
+                za_rad[i],
+                freq_hz,
+                element_id,
+                latitude_rad,
+                iau_order,
+            )
+        })
     }
 }
 

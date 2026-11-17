@@ -641,3 +641,71 @@ fn station_per_element_sum() {
     expected /= 3.5;
     assert_abs_diff_eq!(got, expected, epsilon = 1e-12);
 }
+
+fn write_eep(name: &str, phis: &[f64], thetas: &[f64], freqs: &[f64]) -> TempPath {
+    let path = TempPath::new(name);
+    let h5 = hdf5_metno::File::create(&path.0).unwrap();
+    let group = h5.create_group("averageEEP").unwrap();
+    for (n, v) in [("Phi", phis), ("Theta", thetas), ("Freq", freqs)] {
+        group
+            .new_dataset_builder()
+            .with_data(&arr1(v))
+            .create(n)
+            .unwrap();
+    }
+    let grid = Array5::from_shape_fn(
+        (phis.len(), thetas.len(), freqs.len(), 4, 2),
+        |(i, j, k, l, m)| ((i * 7 + j * 13 + k * 3 + l * 5 + m) as f64 * 0.37).sin(),
+    );
+    group
+        .new_dataset_builder()
+        .with_data(&grid)
+        .create("averageEEP")
+        .unwrap();
+    path
+}
+
+#[test]
+fn eep_array_path_matches_single_path() {
+    let uniform_phis: Vec<f64> = (0..=36).map(|i| i as f64 * TAU / 36.0).collect();
+    let uniform_thetas: Vec<f64> = (0..=18).map(|i| i as f64 * FRAC_PI_2 / 18.0).collect();
+    let mut irregular_phis = uniform_phis.clone();
+    irregular_phis[5] += 0.03;
+    irregular_phis[20] -= 0.05;
+    let irregular_thetas: Vec<f64> = (0..=18)
+        .map(|i| (i as f64 / 18.0).powf(1.3) * FRAC_PI_2)
+        .collect();
+    let freqs = [50e6, 100e6, 175e6, 350e6];
+
+    for (name, phis, thetas) in [
+        ("eep_array_uniform.h5", &uniform_phis, &uniform_thetas),
+        ("eep_array_irregular.h5", &irregular_phis, &irregular_thetas),
+    ] {
+        let file = write_eep(name, phis, thetas, &freqs);
+        let eep = SkaLowEepGrid::new(&file.0).unwrap();
+        // Random directions, plus directions exactly on grid points and edges.
+        let mut az: Vec<f64> = (0..500).map(|i| (i as f64 * 0.7731) % TAU).collect();
+        let mut za: Vec<f64> = (0..500).map(|i| (i as f64 * 0.3117) % FRAC_PI_2).collect();
+        for (&p, &t) in phis.iter().zip(thetas.iter().cycle()) {
+            az.push(FRAC_PI_2 - p);
+            za.push(t);
+        }
+        az.push(0.0);
+        za.push(FRAC_PI_2);
+        for freq in [50e6, 77.7e6, 100e6, 350e6] {
+            let arr = eep
+                .calc_jones_array_pair(&az, &za, freq, 0, Some(-0.47), true)
+                .unwrap();
+            for ((&a, &z), j) in az.iter().zip(&za).zip(&arr) {
+                let s = eep
+                    .calc_jones_pair(a, z, freq, 0, Some(-0.47), true)
+                    .unwrap();
+                assert_abs_diff_eq!(*j, s, epsilon = 1e-12);
+            }
+        }
+        // Out-of-range frequencies are still errors.
+        assert!(eep
+            .calc_jones_array_pair(&az, &za, 351e6, 0, None, false)
+            .is_err());
+    }
+}

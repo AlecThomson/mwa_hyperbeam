@@ -5,9 +5,8 @@
 //! SKA-Low station beams: element responses combined with an array factor.
 
 use marlu::{c64, constants::VEL_C, AzEl, Jones};
-use rayon::prelude::*;
 
-use super::{az_to_phi, everybeam_to_hyperbeam, SkaBeamError, SkaElementResponse};
+use super::{az_to_phi, everybeam_to_hyperbeam, par_map_jones, SkaBeamError, SkaElementResponse};
 
 /// An SKA-Low station: an element-response model, the positions of the
 /// elements and their weights.
@@ -213,10 +212,9 @@ impl<E: SkaElementResponse> SkaStation<E> {
         latitude_rad: Option<f64>,
         iau_order: bool,
     ) -> Result<Vec<Jones<f64>>, SkaBeamError> {
-        azels
-            .par_iter()
-            .map(|azel| self.calc_jones(*azel, freq_hz, pointing, latitude_rad, iau_order))
-            .collect()
+        par_map_jones(azels.len(), |i| {
+            self.calc_jones(azels[i], freq_hz, pointing, latitude_rad, iau_order)
+        })
     }
 
     /// Calculate station-beam Jones matrices for many directions in parallel.
@@ -232,20 +230,16 @@ impl<E: SkaElementResponse> SkaStation<E> {
         latitude_rad: Option<f64>,
         iau_order: bool,
     ) -> Result<Vec<Jones<f64>>, SkaBeamError> {
-        az_rad
-            .par_iter()
-            .zip(za_rad.par_iter())
-            .map(|(&az, &za)| {
-                self.calc_jones_pair(
-                    az,
-                    za,
-                    freq_hz,
-                    pointing_az_rad,
-                    pointing_za_rad,
-                    latitude_rad,
-                    iau_order,
-                )
-            })
-            .collect()
+        par_map_jones(az_rad.len().min(za_rad.len()), |i| {
+            self.calc_jones_pair(
+                az_rad[i],
+                za_rad[i],
+                freq_hz,
+                pointing_az_rad,
+                pointing_za_rad,
+                latitude_rad,
+                iau_order,
+            )
+        })
     }
 }

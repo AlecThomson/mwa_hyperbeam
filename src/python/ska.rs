@@ -4,7 +4,7 @@
 
 //! Python interface to hyperbeam's SKA-Low beam models.
 
-use std::path::PathBuf;
+use std::{borrow::Cow, path::PathBuf};
 
 use self::ndarray::prelude::*;
 use marlu::Jones;
@@ -16,6 +16,14 @@ use crate::ska::{
     SkaElementResponse, SkaLowAnalytic as SkaLowAnalyticRust, SkaLowEepGrid as SkaLowEepGridRust,
     SkaLowEepSph as SkaLowEepSphRust, SkaStation,
 };
+
+/// Borrow a 1D array as a slice, copying only if it isn't contiguous.
+fn contiguous<'a>(a: &'a ArrayView1<'_, f64>) -> Cow<'a, [f64]> {
+    match a.as_slice() {
+        Some(s) => Cow::Borrowed(s),
+        None => Cow::Owned(a.to_vec()),
+    }
+}
 
 fn jones_to_py<'py>(py: Python<'py>, j: Jones<f64>) -> Bound<'py, PyArray1<c64>> {
     PyArray1::from_vec(py, j.to_vec())
@@ -78,13 +86,15 @@ macro_rules! ska_py_class {
             fn calc_jones_array<'py>(
                 &self,
                 py: Python<'py>,
-                az_rad: Vec<f64>,
-                za_rad: Vec<f64>,
+                az_rad: PyArrayLike1<'py, f64, AllowTypeChange>,
+                za_rad: PyArrayLike1<'py, f64, AllowTypeChange>,
                 freq_hz: f64,
                 element_id: usize,
                 latitude_rad: Option<f64>,
                 iau_order: Option<bool>,
             ) -> PyResult<Bound<'py, PyArray2<c64>>> {
+                let (az_rad, za_rad) = (az_rad.as_array(), za_rad.as_array());
+                let (az_rad, za_rad) = (contiguous(&az_rad), contiguous(&za_rad));
                 if az_rad.len() != za_rad.len() {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "az_rad and za_rad must have the same length",
@@ -133,8 +143,8 @@ macro_rules! ska_py_class {
             fn calc_station_jones_array<'py>(
                 &self,
                 py: Python<'py>,
-                az_rad: Vec<f64>,
-                za_rad: Vec<f64>,
+                az_rad: PyArrayLike1<'py, f64, AllowTypeChange>,
+                za_rad: PyArrayLike1<'py, f64, AllowTypeChange>,
                 freq_hz: f64,
                 pointing_az_rad: f64,
                 pointing_za_rad: f64,
@@ -143,6 +153,8 @@ macro_rules! ska_py_class {
                 latitude_rad: Option<f64>,
                 iau_order: Option<bool>,
             ) -> PyResult<Bound<'py, PyArray2<c64>>> {
+                let (az_rad, za_rad) = (az_rad.as_array(), za_rad.as_array());
+                let (az_rad, za_rad) = (contiguous(&az_rad), contiguous(&za_rad));
                 if az_rad.len() != za_rad.len() {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "az_rad and za_rad must have the same length",
