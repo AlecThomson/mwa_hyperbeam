@@ -19,6 +19,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   - `SkaLowEepSph` ("ska-low-eep-sph"): EveryBeam's `skalow_feko`.
   - `SkaStation`, to combine any of these with an array factor (station
     beams), as EveryBeam does for OSKAR telescopes.
+  - `SkaLowBeam`, a runtime-selected model, which is also exposed via the C
+    FFI (`new_ska_low_*_beam`, `ska_low_calc_jones*`,
+    `ska_low_calc_station_jones_array`, `free_ska_low_beam`); see
+    `examples/ska_low.c`.
 
 ## [0.14.0] - 2026-11-17
 

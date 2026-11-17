@@ -40,6 +40,8 @@ fn main() {
     // changed.
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     println!("cargo:rerun-if-changed=src/fee/ffi/mod.rs");
+    println!("cargo:rerun-if-changed=src/analytic/ffi/mod.rs");
+    println!("cargo:rerun-if-changed=src/ska/ffi/mod.rs");
     // Only do this if we're not on docs.rs (doesn't like writing files outside
     // of OUT_DIR).
     match env::var("DOCS_RS").as_deref() {

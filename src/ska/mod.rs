@@ -31,14 +31,17 @@
 //! telescope does.
 
 mod analytic;
+mod beam;
 mod eep_grid;
 mod eep_sph;
 mod error;
+mod ffi;
 mod station;
 #[cfg(test)]
 mod tests;
 
 pub use analytic::SkaLowAnalytic;
+pub use beam::{SkaLowBeam, SkaLowModel};
 pub use eep_grid::SkaLowEepGrid;
 pub use eep_sph::SkaLowEepSph;
 pub use error::{InitSkaBeamError, SkaBeamError};
