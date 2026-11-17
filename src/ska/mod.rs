@@ -36,15 +36,19 @@ mod eep_grid;
 mod eep_sph;
 mod error;
 mod ffi;
+#[cfg(any(feature = "cuda", feature = "hip"))]
+mod gpu;
 mod station;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use analytic::SkaLowAnalytic;
 pub use beam::{SkaLowBeam, SkaLowModel};
 pub use eep_grid::SkaLowEepGrid;
 pub use eep_sph::SkaLowEepSph;
 pub use error::{InitSkaBeamError, SkaBeamError};
+#[cfg(any(feature = "cuda", feature = "hip"))]
+pub use gpu::{SkaGpuTiles, SkaLowBeamGpu, SKA_GPU_MAX_L_MAX};
 pub use station::SkaStation;
 
 use std::f64::consts::FRAC_PI_2;

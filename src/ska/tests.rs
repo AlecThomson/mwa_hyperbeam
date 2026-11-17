@@ -16,10 +16,10 @@ use ndarray::prelude::*;
 use super::*;
 
 /// A unique path in the system temporary directory, removed on drop.
-struct TempPath(PathBuf);
+pub(crate) struct TempPath(pub(crate) PathBuf);
 
 impl TempPath {
-    fn new(name: &str) -> TempPath {
+    pub(crate) fn new(name: &str) -> TempPath {
         let p = std::env::temp_dir().join(format!(
             "hyperbeam_ska_test_{}_{}",
             std::process::id(),
@@ -347,7 +347,12 @@ fn dipole_array_matches_single() {
 // ---------------------------------------------------------------------------
 
 /// Write a synthetic FEKO coefficients directory.
-fn write_feko_dir(name: &str, freqs_mhz: &[f64], num_elements: usize, l_max: usize) -> TempPath {
+pub(crate) fn write_feko_dir(
+    name: &str,
+    freqs_mhz: &[f64],
+    num_elements: usize,
+    l_max: usize,
+) -> TempPath {
     let dir = TempPath::new(name);
     std::fs::create_dir_all(&dir.0).unwrap();
     let nc = l_max * (l_max + 2);
@@ -642,7 +647,7 @@ fn station_per_element_sum() {
     assert_abs_diff_eq!(got, expected, epsilon = 1e-12);
 }
 
-fn write_eep(name: &str, phis: &[f64], thetas: &[f64], freqs: &[f64]) -> TempPath {
+pub(crate) fn write_eep(name: &str, phis: &[f64], thetas: &[f64], freqs: &[f64]) -> TempPath {
     let path = TempPath::new(name);
     let h5 = hdf5_metno::File::create(&path.0).unwrap();
     let group = h5.create_group("averageEEP").unwrap();

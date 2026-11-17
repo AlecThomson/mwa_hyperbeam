@@ -75,6 +75,12 @@ fn main() {
                             "get_analytic_device_tile_map".to_string(),
                             "get_num_unique_analytic_tiles".to_string(),
                             "free_gpu_analytic_beam".to_string(),
+                            "SkaLowBeamGpu".to_string(),
+                            "new_gpu_ska_low_beam".to_string(),
+                            "ska_low_calc_jones_gpu".to_string(),
+                            "ska_low_calc_jones_gpu_device".to_string(),
+                            "ska_low_calc_jones_gpu_device_inner".to_string(),
+                            "free_gpu_ska_low_beam".to_string(),
                         ],
                         ..Default::default()
                     };
@@ -236,7 +242,9 @@ mod gpu {
                 .include("src/fee/gpu/")
                 .file("src/fee/gpu/fee.cu")
                 .include("src/analytic/gpu/")
-                .file("src/analytic/gpu/analytic.cu");
+                .file("src/analytic/gpu/analytic.cu")
+                .include("src/ska/gpu/")
+                .file("src/ska/gpu/ska.cu");
 
             // If $CXX is not set but $CUDA_PATH is, search for
             // $CUDA_PATH/bin/g++ and if it exists, set that as $CXX.
@@ -340,7 +348,8 @@ mod gpu {
                 .include(hip_path.join("include/hip"))
                 .include("src/gpu_common/")
                 .file("src/fee/gpu/fee.cu")
-                .file("src/analytic/gpu/analytic.cu");
+                .file("src/analytic/gpu/analytic.cu")
+                .file("src/ska/gpu/ska.cu");
 
             println!("cargo:rerun-if-env-changed=HIP_FLAGS");
             if let Some(p) = env::var_os("HIP_FLAGS") {

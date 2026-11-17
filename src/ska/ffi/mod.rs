@@ -398,3 +398,250 @@ pub unsafe extern "C" fn free_ska_low_beam(ska_low_beam: *mut SkaLowBeam) {
         drop(Box::from_raw(ska_low_beam));
     }
 }
+
+cfg_if::cfg_if! {
+    if #[cfg(any(feature = "cuda", feature = "hip"))] {
+        use marlu::AzEl;
+        use ndarray::prelude::*;
+
+        use super::{SkaGpuTiles, SkaLowBeamGpu};
+        use crate::gpu::{DevicePointer, GpuFloat};
+    }
+}
+
+/// Prepare a GPU SKA-Low beam for the given frequencies and tiles. A "tile" is
+/// either a single element or a station.
+///
+/// # Arguments
+///
+/// * `ska_low_beam` - A pointer to a `SkaLowBeam` struct.
+/// * `num_freqs` - The number of frequencies in `freqs_hz`.
+/// * `freqs_hz` - The frequencies \[Hz\].
+/// * `num_tiles` - The number of tiles.
+/// * `element_ids` - If `positions_enu` is null, each tile is a single element
+///   and this gives each tile's element ID (`num_tiles` values; only used by
+///   `ska-low-eep-sph`). May be null, in which case element 0 is used for all
+///   tiles.
+/// * `num_station_elements` - The number of elements per station (only used
+///   with `positions_enu`).
+/// * `positions_enu` - If not null, each tile is a station, and this holds `3 *
+///   num_station_elements * num_tiles` doubles (East, North, Up \[metres\],
+///   station-major).
+/// * `weights` - If not null (and `positions_enu` is not null),
+///   `num_station_elements * num_tiles` element weights (0 flags an element).
+/// * `gpu_ska_low_beam` - a double pointer to the `SkaLowBeamGpu` struct which
+///   is set by this function. This struct must be freed by calling
+///   `free_gpu_ska_low_beam`.
+///
+/// # Returns
+///
+/// * An exit code integer. If this is non-zero then an error occurred; the
+///   details can be obtained by (1) getting the length of the error string by
+///   calling `hb_last_error_length` and (2) calling `hb_last_error_message`
+///   with a string buffer with a length at least equal to the error length.
+#[cfg(any(feature = "cuda", feature = "hip"))]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn new_gpu_ska_low_beam(
+    ska_low_beam: *const SkaLowBeam,
+    num_freqs: u32,
+    freqs_hz: *const f64,
+    num_tiles: u32,
+    element_ids: *const u32,
+    num_station_elements: u32,
+    positions_enu: *const f64,
+    weights: *const f64,
+    gpu_ska_low_beam: *mut *mut SkaLowBeamGpu,
+) -> i32 {
+    let beam = &*ska_low_beam;
+    let freqs = slice::from_raw_parts(freqs_hz, num_freqs as usize);
+    let (nt, ne) = (num_tiles as usize, num_station_elements as usize);
+    let ids: Vec<usize>;
+    let tiles = if positions_enu.is_null() {
+        ids = if element_ids.is_null() {
+            vec![0; nt]
+        } else {
+            slice::from_raw_parts(element_ids, nt)
+                .iter()
+                .map(|&i| i as usize)
+                .collect()
+        };
+        SkaGpuTiles::Elements(&ids)
+    } else {
+        SkaGpuTiles::Stations {
+            positions_enu: ArrayView3::from_shape_ptr((nt, ne, 3), positions_enu),
+            weights: if weights.is_null() {
+                None
+            } else {
+                Some(ArrayView2::from_shape_ptr((nt, ne), weights))
+            },
+        }
+    };
+    let gpu_beam = ffi_error!(beam.gpu_prepare(freqs, tiles));
+    *gpu_ska_low_beam = Box::into_raw(Box::new(gpu_beam));
+    0
+}
+
+/// Calculate GPU SKA-Low beam responses and copy them to the host. `jones`
+/// must have room for `8 * num_tiles * num_freqs * num_azza` floats (`float`
+/// or `double`, depending on how hyperbeam was compiled), ordered tile, then
+/// frequency, then direction.
+///
+/// # Arguments
+///
+/// * `gpu_ska_low_beam` - A pointer to a `SkaLowBeamGpu` struct.
+/// * `num_azza` - The number of directions.
+/// * `az_rad` - Host pointer to azimuths \[radians\].
+/// * `za_rad` - Host pointer to zenith angles \[radians\].
+/// * `pointing_az_rad` - The station pointing azimuth (stations only).
+/// * `pointing_za_rad` - The station pointing zenith angle (stations only).
+/// * `latitude_rad` - A pointer to the telescope latitude. If not null, the
+///   parallactic-angle correction is applied.
+/// * `iau_order` - 1 for IAU order (only used with a latitude).
+/// * `jones` - Host pointer to the output buffer.
+///
+/// # Returns
+///
+/// * An exit code integer. If this is non-zero then an error occurred; the
+///   details can be obtained by (1) getting the length of the error string by
+///   calling `hb_last_error_length` and (2) calling `hb_last_error_message`
+///   with a string buffer with a length at least equal to the error length.
+#[cfg(any(feature = "cuda", feature = "hip"))]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ska_low_calc_jones_gpu(
+    gpu_ska_low_beam: *const SkaLowBeamGpu,
+    num_azza: u32,
+    az_rad: *const GpuFloat,
+    za_rad: *const GpuFloat,
+    pointing_az_rad: f64,
+    pointing_za_rad: f64,
+    latitude_rad: *const f64,
+    iau_order: u8,
+    jones: *mut GpuFloat,
+) -> i32 {
+    let iau_order = ffi_error!(bool_arg(iau_order, "iau_order"));
+    let beam = &*gpu_ska_low_beam;
+    let n = num_azza as usize;
+    let results = ffi_error!(beam.calc_jones_pair(
+        slice::from_raw_parts(az_rad, n),
+        slice::from_raw_parts(za_rad, n),
+        AzEl::from_radians(
+            pointing_az_rad,
+            std::f64::consts::FRAC_PI_2 - pointing_za_rad
+        ),
+        latitude_rad.as_ref().copied(),
+        iau_order,
+    ));
+    let out = slice::from_raw_parts_mut(jones, results.len() * 8);
+    for (j, o) in results.iter().zip(out.chunks_exact_mut(8)) {
+        for k in 0..4 {
+            o[2 * k] = j[k].re;
+            o[2 * k + 1] = j[k].im;
+        }
+    }
+    0
+}
+
+/// Calculate GPU SKA-Low beam responses into a device buffer, given host
+/// directions. `d_jones` must be a device buffer with room for `num_tiles *
+/// num_freqs * num_azza` Jones matrices (8 floats each). See
+/// `ska_low_calc_jones_gpu` for the other arguments.
+///
+/// # Returns
+///
+/// * An exit code integer. If this is non-zero then an error occurred; the
+///   details can be obtained by (1) getting the length of the error string by
+///   calling `hb_last_error_length` and (2) calling `hb_last_error_message`
+///   with a string buffer with a length at least equal to the error length.
+#[cfg(any(feature = "cuda", feature = "hip"))]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ska_low_calc_jones_gpu_device(
+    gpu_ska_low_beam: *const SkaLowBeamGpu,
+    num_azza: u32,
+    az_rad: *const GpuFloat,
+    za_rad: *const GpuFloat,
+    pointing_az_rad: f64,
+    pointing_za_rad: f64,
+    latitude_rad: *const f64,
+    iau_order: u8,
+    d_jones: *mut GpuFloat,
+) -> i32 {
+    let iau_order = ffi_error!(bool_arg(iau_order, "iau_order"));
+    let beam = &*gpu_ska_low_beam;
+    let n = num_azza as usize;
+    let d_az = ffi_error!(DevicePointer::copy_to_device(slice::from_raw_parts(
+        az_rad, n
+    )));
+    let d_za = ffi_error!(DevicePointer::copy_to_device(slice::from_raw_parts(
+        za_rad, n
+    )));
+    let d_lat = ffi_error!(latitude_rad
+        .as_ref()
+        .map(|&l| DevicePointer::copy_to_device(&[l as GpuFloat]))
+        .transpose());
+    ffi_error!(beam.calc_jones_device_pair_inner(
+        d_az.get(),
+        d_za.get(),
+        n as i32,
+        pointing_az_rad as GpuFloat,
+        pointing_za_rad as GpuFloat,
+        d_lat.as_ref().map(|d| d.get()).unwrap_or(std::ptr::null()),
+        iau_order,
+        d_jones.cast(),
+    ));
+    0
+}
+
+/// Calculate GPU SKA-Low beam responses with all inputs and outputs already
+/// on the device. `d_latitude_rad` is a device pointer (or null for no
+/// parallactic-angle correction). See `ska_low_calc_jones_gpu_device`.
+///
+/// # Returns
+///
+/// * An exit code integer. If this is non-zero then an error occurred; the
+///   details can be obtained by (1) getting the length of the error string by
+///   calling `hb_last_error_length` and (2) calling `hb_last_error_message`
+///   with a string buffer with a length at least equal to the error length.
+#[cfg(any(feature = "cuda", feature = "hip"))]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ska_low_calc_jones_gpu_device_inner(
+    gpu_ska_low_beam: *const SkaLowBeamGpu,
+    num_azza: i32,
+    d_az_rad: *const GpuFloat,
+    d_za_rad: *const GpuFloat,
+    pointing_az_rad: GpuFloat,
+    pointing_za_rad: GpuFloat,
+    d_latitude_rad: *const GpuFloat,
+    iau_order: u8,
+    d_jones: *mut GpuFloat,
+) -> i32 {
+    let iau_order = ffi_error!(bool_arg(iau_order, "iau_order"));
+    let beam = &*gpu_ska_low_beam;
+    ffi_error!(beam.calc_jones_device_pair_inner(
+        d_az_rad,
+        d_za_rad,
+        num_azza,
+        pointing_az_rad,
+        pointing_za_rad,
+        d_latitude_rad,
+        iau_order,
+        d_jones.cast(),
+    ));
+    0
+}
+
+/// Free the memory associated with a GPU SKA-Low beam.
+///
+/// # Arguments
+///
+/// * `gpu_ska_low_beam` - the pointer to the `SkaLowBeamGpu` struct.
+#[cfg(any(feature = "cuda", feature = "hip"))]
+#[no_mangle]
+pub unsafe extern "C" fn free_gpu_ska_low_beam(gpu_ska_low_beam: *mut SkaLowBeamGpu) {
+    if !gpu_ska_low_beam.is_null() {
+        drop(Box::from_raw(gpu_ska_low_beam));
+    }
+}

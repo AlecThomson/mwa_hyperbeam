@@ -23,6 +23,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
     FFI (`new_ska_low_*_beam`, `ska_low_calc_jones*`,
     `ska_low_calc_station_jones_array`, `free_ska_low_beam`); see
     `examples/ska_low.c`.
+  - CUDA/HIP support for all SKA-Low models, for single elements or whole
+    stations (`SkaLowBeam::gpu_prepare` -> `SkaLowBeamGpu`, and
+    `new_gpu_ska_low_beam`/`ska_low_calc_jones_gpu*` in the C FFI). Results
+    use the same `(tile, freq, direction)` layout as `FEEBeamGpu`.
 
 ## [0.14.0] - 2026-11-17
 

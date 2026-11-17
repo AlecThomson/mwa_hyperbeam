@@ -100,7 +100,9 @@ conventions as the FEE beam (including the optional parallactic-angle
 correction). `element_response` returns exactly what EveryBeam's element
 response does (theta/phi in EveryBeam's convention). Station beams can be
 computed with `calc_station_jones_array` (Python) or `SkaStation` (Rust),
-given element positions.
+given element positions. All models also run on GPUs (CUDA/HIP) via
+`SkaLowBeam::gpu_prepare`, for single elements or whole stations, with the same
+result layout as `FEEBeamGpu`.
 
 ```python
 >>> import numpy as np, mwa_hyperbeam

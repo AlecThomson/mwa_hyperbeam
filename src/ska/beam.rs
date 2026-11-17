@@ -66,8 +66,25 @@ impl std::str::FromStr for SkaLowModel {
 /// `SkaLowBeam` implements [`SkaElementResponse`], so all of the `calc_jones*`
 /// methods and [`SkaStation`](super::SkaStation) can be used with it.
 pub struct SkaLowBeam {
-    model: SkaLowModel,
-    inner: Box<dyn SkaElementResponse + Send + Sync>,
+    pub(crate) inner: SkaLowBeamInner,
+}
+
+/// The concrete model behind a [`SkaLowBeam`].
+pub(crate) enum SkaLowBeamInner {
+    Analytic(SkaLowAnalytic),
+    EepGrid(SkaLowEepGrid),
+    EepSph(SkaLowEepSph),
+}
+
+/// Dispatch a method call to the concrete model.
+macro_rules! dispatch {
+    ($self:expr, $m:ident => $e:expr) => {
+        match &$self.inner {
+            SkaLowBeamInner::Analytic($m) => $e,
+            SkaLowBeamInner::EepGrid($m) => $e,
+            SkaLowBeamInner::EepSph($m) => $e,
+        }
+    };
 }
 
 impl SkaLowBeam {
@@ -80,8 +97,7 @@ impl SkaLowBeam {
             SkaLowAnalytic::new_without_taper()
         };
         SkaLowBeam {
-            model: SkaLowModel::Analytic,
-            inner: Box::new(beam),
+            inner: SkaLowBeamInner::Analytic(beam),
         }
     }
 
@@ -96,8 +112,7 @@ impl SkaLowBeam {
             None => SkaLowEepGrid::new_from_env()?,
         };
         Ok(SkaLowBeam {
-            model: SkaLowModel::EepGrid,
-            inner: Box::new(beam),
+            inner: SkaLowBeamInner::EepGrid(beam),
         })
     }
 
@@ -112,14 +127,17 @@ impl SkaLowBeam {
             None => SkaLowEepSph::new_from_env()?,
         };
         Ok(SkaLowBeam {
-            model: SkaLowModel::EepSph,
-            inner: Box::new(beam),
+            inner: SkaLowBeamInner::EepSph(beam),
         })
     }
 
     /// Which model this is.
     pub fn model(&self) -> SkaLowModel {
-        self.model
+        match &self.inner {
+            SkaLowBeamInner::Analytic(_) => SkaLowModel::Analytic,
+            SkaLowBeamInner::EepGrid(_) => SkaLowModel::EepGrid,
+            SkaLowBeamInner::EepSph(_) => SkaLowModel::EepSph,
+        }
     }
 }
 
@@ -131,12 +149,11 @@ impl SkaElementResponse for SkaLowBeam {
         theta_rad: f64,
         phi_rad: f64,
     ) -> Result<Jones<f64>, SkaBeamError> {
-        self.inner
-            .element_response(element_id, freq_hz, theta_rad, phi_rad)
+        dispatch!(self, b => b.element_response(element_id, freq_hz, theta_rad, phi_rad))
     }
 
     fn num_elements(&self) -> Option<usize> {
-        self.inner.num_elements()
+        dispatch!(self, b => b.num_elements())
     }
 
     // Forward the array methods so that model-specific fast paths are used.
@@ -148,8 +165,7 @@ impl SkaElementResponse for SkaLowBeam {
         latitude_rad: Option<f64>,
         iau_order: bool,
     ) -> Result<Vec<Jones<f64>>, SkaBeamError> {
-        self.inner
-            .calc_jones_array(azels, freq_hz, element_id, latitude_rad, iau_order)
+        dispatch!(self, b => b.calc_jones_array(azels, freq_hz, element_id, latitude_rad, iau_order))
     }
 
     fn calc_jones_array_pair(
@@ -161,13 +177,6 @@ impl SkaElementResponse for SkaLowBeam {
         latitude_rad: Option<f64>,
         iau_order: bool,
     ) -> Result<Vec<Jones<f64>>, SkaBeamError> {
-        self.inner.calc_jones_array_pair(
-            az_rad,
-            za_rad,
-            freq_hz,
-            element_id,
-            latitude_rad,
-            iau_order,
-        )
+        dispatch!(self, b => b.calc_jones_array_pair(az_rad, za_rad, freq_hz, element_id, latitude_rad, iau_order))
     }
 }

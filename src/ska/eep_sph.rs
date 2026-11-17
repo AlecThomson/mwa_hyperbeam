@@ -213,7 +213,7 @@ impl SkaLowEepSph {
 
     /// Find the index of the file with the frequency closest to `freq_hz`
     /// (ties go to the lower frequency, as in EveryBeam).
-    fn closest_file(&self, freq_hz: f64) -> usize {
+    pub(crate) fn closest_file(&self, freq_hz: f64) -> usize {
         let i = self.files.partition_point(|f| f.freq_hz < freq_hz);
         if i == 0 {
             0
@@ -237,7 +237,7 @@ impl SkaLowEepSph {
 
     /// Get (reading if necessary) the coefficients of a file, truncated to
     /// this object's `l_max`.
-    fn get_coeffs(&self, file_index: usize) -> Result<Arc<Array3<c64>>, SkaBeamError> {
+    pub(crate) fn get_coeffs(&self, file_index: usize) -> Result<Arc<Array3<c64>>, SkaBeamError> {
         if let Some(c) = self.cache.read().get(&file_index) {
             return Ok(Arc::clone(c));
         }

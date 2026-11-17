@@ -71,4 +71,16 @@ pub enum SkaBeamError {
 
     #[error("HDF5 error: {0}")]
     Hdf5(#[from] hdf5_metno::Error),
+
+    #[cfg(any(feature = "cuda", feature = "hip"))]
+    #[error("The GPU code supports spherical-wave degrees up to {max}, but {got} is needed; use a smaller l_max")]
+    GpuLMax { got: usize, max: usize },
+
+    #[cfg(any(feature = "cuda", feature = "hip"))]
+    #[error("The number of elements differs between the coefficient files used for the requested frequencies")]
+    GpuInconsistentElements,
+
+    #[cfg(any(feature = "cuda", feature = "hip"))]
+    #[error(transparent)]
+    Gpu(#[from] crate::gpu::GpuError),
 }

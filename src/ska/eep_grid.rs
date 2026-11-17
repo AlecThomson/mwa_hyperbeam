@@ -24,7 +24,7 @@ pub const EEP_GRID_FILE_VAR: &str = "SKA_LOW_EEP_GRID_FILE";
 pub const EVERYBEAM_DATADIR_VAR: &str = "EVERYBEAM_DATADIR";
 
 /// A grid interpolated to a single frequency (phi x theta, flattened).
-type Plane = Arc<Vec<[c64; 4]>>;
+pub(crate) type Plane = Arc<Vec<[c64; 4]>>;
 
 /// The SKA-Low gridded, station-averaged embedded-element-pattern (EEP) model
 /// ("ska-low-eep-grid").
@@ -194,7 +194,7 @@ impl SkaLowEepGrid {
     ///
     /// The most recently used plane is cached, so repeated calls at the same
     /// frequency are cheap.
-    fn freq_plane(&self, freq_hz: f64) -> Result<Plane, SkaBeamError> {
+    pub(crate) fn freq_plane(&self, freq_hz: f64) -> Result<Plane, SkaBeamError> {
         if let Some((f, plane)) = &*self.plane_cache.lock() {
             if *f == freq_hz {
                 return Ok(Arc::clone(plane));
