@@ -94,6 +94,11 @@ inline __device__ JONES ska_zero_jones() {
 
 inline __device__ COMPLEX ska_conj(COMPLEX a) { return MAKE_COMPLEX(a.x, -a.y); }
 
+// Negate a complex number. (Multiplying by a double literal like -1.0 can
+// select HIP's own templated operators for single-precision complex types,
+// which don't compile with ROCm 7; avoid mixed-precision scalar operations.)
+inline __device__ COMPLEX ska_neg(COMPLEX a) { return MAKE_COMPLEX(-a.x, -a.y); }
+
 inline __device__ void ska_add_scaled(JONES *acc, const JONES *j, COMPLEX s) {
     acc->j00 += j->j00 * s;
     acc->j01 += j->j01 * s;
@@ -337,8 +342,8 @@ inline __device__ JONES ska_sph_response(const SkaGpuModel *m, int i_freq, int e
     return JONES{
         .j00 = ska_conj(e_theta[0] * sqrt_fac),
         .j01 = ska_conj(e_phi[0] * sqrt_fac),
-        .j10 = ska_conj(e_theta[1] * sqrt_fac) * -1.0,
-        .j11 = ska_conj(e_phi[1] * sqrt_fac) * -1.0,
+        .j10 = ska_neg(ska_conj(e_theta[1] * sqrt_fac)),
+        .j11 = ska_neg(ska_conj(e_phi[1] * sqrt_fac)),
     };
 }
 
@@ -474,8 +479,8 @@ __global__ void ska_kernel(const SkaGpuModel model, const FLOAT *azs, const FLOA
                 } else {
                     // EveryBeam [X_theta, X_phi, Y_theta, Y_phi] -> hyperbeam
                     // [X_theta, X_az, Y_theta, Y_az].
-                    j.j01 *= -1.0;
-                    j.j11 *= -1.0;
+                    j.j01 = ska_neg(j.j01);
+                    j.j11 = ska_neg(j.j11);
                     if (latitude_rad != NULL)
                         ska_apply_pa_correction(&j, pa, iau_order);
                 }
