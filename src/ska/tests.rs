@@ -313,16 +313,37 @@ fn dipole_values() {
 fn dipole_parallactic_matches_fee_convention() {
     // With a latitude, the conversion must be the same one used by the FEE
     // beam.
+    // beam (which computes the parallactic angle via (HA, Dec); the SKA code
+    // computes it directly from (az, za), which agrees away from the
+    // ill-conditioned zenith).
     let model = SkaLowAnalytic::new();
-    let (az, za, lat) = (0.7, 0.4, -0.4660608448386394);
-    let raw = model.calc_jones_pair(az, za, 1e8, 0, None, false).unwrap();
-    for iau in [false, true] {
-        let mut expected = raw;
-        crate::fee::apply_parallactic_correction(az, za, lat, iau, &mut expected);
-        let j = model
-            .calc_jones_pair(az, za, 1e8, 0, Some(lat), iau)
-            .unwrap();
-        assert_abs_diff_eq!(j, expected);
+    for lat in [-0.4660608448386394, 0.3, 1.2, -1.4] {
+        for i in 0..500 {
+            let az = (i as f64 * 0.7731) % TAU;
+            let za = 1e-3 + (i as f64 * 0.3117) % 1.5;
+            let raw = model.calc_jones_pair(az, za, 1e8, 0, None, false).unwrap();
+            for iau in [false, true] {
+                let mut expected = raw;
+                crate::fee::apply_parallactic_correction(az, za, lat, iau, &mut expected);
+                let j = model
+                    .calc_jones_pair(az, za, 1e8, 0, Some(lat), iau)
+                    .unwrap();
+                assert_abs_diff_eq!(j, expected, epsilon = 1e-10);
+            }
+        }
+    }
+}
+
+#[test]
+fn parallactic_angle_near_zenith() {
+    // The direct formula tends smoothly to az + pi at the zenith.
+    let lat = -0.4660608448386394;
+    for az in [0.1_f64, 1.0, 2.5, 4.0] {
+        for za in [1e-12, 1e-9, 1e-6] {
+            let pa = super::parallactic_angle(az, za, lat);
+            let expected = (-az.sin()).atan2(-az.cos());
+            assert_abs_diff_eq!(pa, expected, epsilon = 1e-5);
+        }
     }
 }
 

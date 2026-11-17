@@ -56,7 +56,7 @@ use std::f64::consts::FRAC_PI_2;
 use marlu::{AzEl, Jones};
 use rayon::prelude::*;
 
-use crate::fee::apply_parallactic_correction;
+use crate::fee::apply_parallactic_rotation;
 
 /// Convert an azimuth (North through East) to an EveryBeam/OSKAR phi (East
 /// through North).
@@ -78,9 +78,25 @@ pub(crate) fn everybeam_to_hyperbeam(
 ) -> Jones<f64> {
     let mut jones = Jones::from([j[0], -j[1], j[2], -j[3]]);
     if let Some(latitude_rad) = latitude_rad {
-        apply_parallactic_correction(az_rad, za_rad, latitude_rad, iau_order, &mut jones);
+        let pa = parallactic_angle(az_rad, za_rad, latitude_rad);
+        apply_parallactic_rotation(pa, iau_order, &mut jones);
     }
     jones
+}
+
+/// The parallactic angle of a direction (azimuth North through East, zenith
+/// angle) at a latitude.
+///
+/// This is the same angle as ERFA's `hd2pa` (as used by the FEE beam), but it
+/// is computed directly from the azimuth and zenith angle rather than via
+/// (HA, Dec), which is well conditioned near the zenith (important for the
+/// single-precision GPU code; the GPU code uses the same formula).
+#[inline]
+pub(crate) fn parallactic_angle(az_rad: f64, za_rad: f64, latitude_rad: f64) -> f64 {
+    let (s_az, c_az) = az_rad.sin_cos();
+    let (s_za, c_za) = za_rad.sin_cos();
+    let (s_lat, c_lat) = latitude_rad.sin_cos();
+    (-s_az * c_lat).atan2(s_lat * s_za - c_lat * c_za * c_az)
 }
 
 /// Evaluate `f(i)` for `i` in `0..n` in parallel into a pre-allocated vector,

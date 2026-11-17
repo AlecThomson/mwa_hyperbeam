@@ -25,7 +25,12 @@ const EPSILON: f64 = 1e-10;
 
 fn directions() -> (Vec<f64>, Vec<f64>) {
     let az: Vec<f64> = (0..300).map(|i| (i as f64 * 0.7731) % TAU).collect();
-    let za: Vec<f64> = (0..300).map(|i| (i as f64 * 0.3117) % 1.5).collect();
+    let mut za: Vec<f64> = (0..300).map(|i| (i as f64 * 0.3117) % 1.5).collect();
+    // Include the zenith and directions very close to it, where single
+    // precision needs care.
+    for (i, z) in [1e-7, 1e-5, 1e-4, 3e-4, 1e-3, 1e-2].iter().enumerate() {
+        za[1 + i] = *z;
+    }
     (az, za)
 }
 

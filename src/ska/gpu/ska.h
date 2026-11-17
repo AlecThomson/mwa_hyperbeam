@@ -235,8 +235,11 @@ inline __device__ void ska_legendre_norm(int n, FLOAT cos_theta, FLOAT sin_theta
             p[r] *= scale;
     }
 
-    // Non-underflow branch.
-    if (cos_theta != 1.0 && FABS(sn) >= tol) {
+    // Non-underflow branch. (ska-sdp-func tests cos_theta != 1 here. In
+    // single precision, cos(theta) rounds to exactly 1 within ~0.02 deg of the
+    // pole, which would skip this branch and give wrong values; testing
+    // sin(theta) instead is equivalent in double precision, as theta >= 1e-5.)
+    if (sin_theta > 0.0 && FABS(sn) >= tol) {
         FLOAT c = 1.0;
         for (int k = 1; k <= n; ++k)
             c *= (1.0 - 1.0 / (2.0 * k));
@@ -400,10 +403,14 @@ __global__ void ska_kernel(const SkaGpuModel model, const FLOAT *azs, const FLOA
         SINCOS(pointing_za, &s_pza, &c_pza);
         const FLOAT ds[3] = {s_pza * s_paz - s_za * s_az, s_pza * c_paz - s_za * c_az, c_pza - c_za};
 
+        // The parallactic angle, computed directly from (az, za) rather than
+        // via (HA, Dec) so that it is well conditioned near the zenith in
+        // single precision (see parallactic_angle in src/ska/mod.rs).
         FLOAT pa = 0.0;
         if (latitude_rad != NULL) {
-            HADec hadec = azel_to_hadec(az, M_PI_2 - za, *latitude_rad);
-            pa = get_parallactic_angle(hadec, *latitude_rad);
+            FLOAT s_lat, c_lat;
+            SINCOS(*latitude_rad, &s_lat, &c_lat);
+            pa = ATAN2(-s_az * c_lat, s_lat * s_za - c_lat * c_za * c_az);
         }
 
         for (int i_freq = 0; i_freq < num_freqs; i_freq++) {
