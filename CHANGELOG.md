@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- SKA-Low element beam models (`ska` module, also in Python), matching the
+  SKA-Low models in [EveryBeam](https://git.astron.nl/RD/EveryBeam) master
+  (after 0.9.1):
+  - `SkaLowAnalytic` ("ska-low-analytic"): EveryBeam's `oskar_dipole_cos`
+    (and `oskar_dipole` via `SkaLowAnalytic::new_without_taper`).
+  - `SkaLowEepGrid` ("ska-low-eep-grid"): EveryBeam's `gridded_eep`.
+  - `SkaLowEepSph` ("ska-low-eep-sph"): EveryBeam's `skalow_feko`.
+  - `SkaStation`, to combine any of these with an array factor (station
+    beams), as EveryBeam does for OSKAR telescopes.
+
 ## [0.14.0] - 2026-11-17
 
 ### Changes

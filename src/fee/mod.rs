@@ -874,7 +874,7 @@ fn fix_amps(amps: &[f64], delays: &[u32; 16]) -> [f64; 32] {
 ///
 /// See for how/why this is done:
 /// <https://github.com/MWATelescope/mwa_hyperbeam/blob/main/fee_pols.pdf>
-fn apply_parallactic_correction(
+pub(crate) fn apply_parallactic_correction(
     az_rad: f64,
     za_rad: f64,
     latitude_rad: f64,

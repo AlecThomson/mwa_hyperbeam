@@ -84,6 +84,30 @@ calc_jones(az_rad, za_rad, freq_hz, delays, amps, norm_to_zenith, latitude_rad, 
   1.73003520e-05-1.53580286e-05j -2.23184781e-01-4.51051073e-02j]
 ```
 
+### SKA-Low beams
+
+`hyperbeam` also provides the SKA-Low (OSKAR) element beam models available in
+[EveryBeam](https://git.astron.nl/RD/EveryBeam):
+
+| hyperbeam model    | Rust / Python class | EveryBeam `element_response_model` | Data needed |
+|--------------------|---------------------|------------------------------------|-------------|
+| `ska-low-analytic` | `SkaLowAnalytic`    | `oskar_dipole_cos` (`oskar_dipole` with `cos_taper=False`) | none |
+| `ska-low-eep-grid` | `SkaLowEepGrid`     | `gridded_eep`                      | EEP grid HDF5 file (`SKA_LOW_EEP_GRID_FILE`, or `$EVERYBEAM_DATADIR/oskar_eep_grid.h5`) |
+| `ska-low-eep-sph`  | `SkaLowEepSph`      | `skalow_feko`                      | directory of FEKO coefficient HDF5 files (`SKA_LOW_EEP_SPH_PATH`, or `$EVERYBEAM_DATADIR/skalow`) |
+
+`calc_jones`/`calc_jones_array` use the same direction and polarisation
+conventions as the FEE beam (including the optional parallactic-angle
+correction). `element_response` returns exactly what EveryBeam's element
+response does (theta/phi in EveryBeam's convention). Station beams can be
+computed with `calc_station_jones_array` (Python) or `SkaStation` (Rust),
+given element positions.
+
+```python
+>>> import numpy as np, mwa_hyperbeam
+>>> beam = mwa_hyperbeam.SkaLowEepGrid("oskar_eep_grid.h5")
+>>> beam.calc_jones_array(az_rad, za_rad, 110e6, latitude_rad=-0.4660608448386394, iau_order=True)
+```
+
 ### CUDA / HIP
 
 `hyperbeam` also can also be run on NVIDIA GPUs, or AMD GPUs. To see an example

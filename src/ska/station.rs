@@ -1,0 +1,251 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+//! SKA-Low station beams: element responses combined with an array factor.
+
+use marlu::{c64, constants::VEL_C, AzEl, Jones};
+use rayon::prelude::*;
+
+use super::{az_to_phi, everybeam_to_hyperbeam, SkaBeamError, SkaElementResponse};
+
+/// An SKA-Low station: an element-response model, the positions of the
+/// elements and their weights.
+///
+/// The station response is computed as EveryBeam does for OSKAR telescopes
+/// (with `use_channel_frequency = true`, which EveryBeam requires for OSKAR):
+///
+/// `J(s) = sum_i w_i exp(-2 pi i f / c (s0 - s) . r_i) E_i(s) / sum_i w_i`
+///
+/// where `s` is the direction of interest, `s0` the pointing direction, `r_i`
+/// the element positions and `E_i` the element responses. If the element model
+/// has the same response for every element (e.g. [`SkaLowEepGrid`],
+/// [`SkaLowAnalytic`]), `E_i` is only evaluated once.
+///
+/// Element positions are in metres in a local East, North, Up frame (relative
+/// to any origin; the station centre is conventional). Only the relative
+/// geometry matters, apart from an overall phase.
+///
+/// [`SkaLowEepGrid`]: super::SkaLowEepGrid
+/// [`SkaLowAnalytic`]: super::SkaLowAnalytic
+pub struct SkaStation<E: SkaElementResponse> {
+    element: E,
+    positions_enu: Vec<[f64; 3]>,
+    weights: Vec<f64>,
+}
+
+/// Unit vector (East, North, Up) for an azimuth and zenith angle.
+#[inline]
+fn enu_unit_vector(az_rad: f64, za_rad: f64) -> [f64; 3] {
+    let (s_az, c_az) = az_rad.sin_cos();
+    let (s_za, c_za) = za_rad.sin_cos();
+    [s_za * s_az, s_za * c_az, c_za]
+}
+
+impl<E: SkaElementResponse> SkaStation<E> {
+    /// Create a new station. `weights` (if given) must have one value per
+    /// element; a weight of 0 flags an element. If not given, all weights are
+    /// one. If the element model has distinct per-element responses, element `i`
+    /// uses the response with `element_id = i`, so the number of positions
+    /// must match the number of elements in the model.
+    pub fn new(
+        element: E,
+        positions_enu: Vec<[f64; 3]>,
+        weights: Option<Vec<f64>>,
+    ) -> Result<SkaStation<E>, SkaBeamError> {
+        if let Some(n) = element.num_elements() {
+            if positions_enu.len() != n {
+                return Err(SkaBeamError::PositionsLength {
+                    got: positions_enu.len(),
+                    expected: n,
+                });
+            }
+        }
+        let weights = match weights {
+            Some(w) => {
+                if w.len() != positions_enu.len() {
+                    return Err(SkaBeamError::WeightsLength {
+                        got: w.len(),
+                        expected: positions_enu.len(),
+                    });
+                }
+                w
+            }
+            None => vec![1.0; positions_enu.len()],
+        };
+        if weights.iter().sum::<f64>() == 0.0 {
+            return Err(SkaBeamError::AllElementsFlagged);
+        }
+        Ok(SkaStation {
+            element,
+            positions_enu,
+            weights,
+        })
+    }
+
+    /// The element-response model of this station.
+    pub fn element(&self) -> &E {
+        &self.element
+    }
+
+    /// The element positions (East, North, Up) \[metres\].
+    pub fn positions_enu(&self) -> &[[f64; 3]] {
+        &self.positions_enu
+    }
+
+    /// The element weights.
+    pub fn weights(&self) -> &[f64] {
+        &self.weights
+    }
+
+    /// The (scalar) array factor of the station, normalised by the sum of the
+    /// weights (so it is 1 in the pointing direction).
+    pub fn array_factor(
+        &self,
+        az_rad: f64,
+        za_rad: f64,
+        freq_hz: f64,
+        pointing_az_rad: f64,
+        pointing_za_rad: f64,
+    ) -> c64 {
+        let s = enu_unit_vector(az_rad, za_rad);
+        let s0 = enu_unit_vector(pointing_az_rad, pointing_za_rad);
+        let ds = [s0[0] - s[0], s0[1] - s[1], s0[2] - s[2]];
+        let k = -std::f64::consts::TAU * freq_hz / VEL_C;
+        let sum_w: f64 = self.weights.iter().sum();
+        self.positions_enu
+            .iter()
+            .zip(&self.weights)
+            .filter(|(_, &w)| w != 0.0)
+            .map(|(r, &w)| c64::cis(k * (ds[0] * r[0] + ds[1] * r[1] + ds[2] * r[2])) * w)
+            .sum::<c64>()
+            / sum_w
+    }
+
+    /// The station response in EveryBeam's convention (`[[X_theta, X_phi],
+    /// [Y_theta, Y_phi]]`), for a direction (azimuth North through East,
+    /// zenith angle) and pointing.
+    pub fn station_response(
+        &self,
+        az_rad: f64,
+        za_rad: f64,
+        freq_hz: f64,
+        pointing_az_rad: f64,
+        pointing_za_rad: f64,
+    ) -> Result<Jones<f64>, SkaBeamError> {
+        let phi = az_to_phi(az_rad);
+        if self.element.num_elements().is_none() {
+            let af = self.array_factor(az_rad, za_rad, freq_hz, pointing_az_rad, pointing_za_rad);
+            let e = self.element.element_response(0, freq_hz, za_rad, phi)?;
+            return Ok(e * af);
+        }
+
+        let s = enu_unit_vector(az_rad, za_rad);
+        let s0 = enu_unit_vector(pointing_az_rad, pointing_za_rad);
+        let ds = [s0[0] - s[0], s0[1] - s[1], s0[2] - s[2]];
+        let k = -std::f64::consts::TAU * freq_hz / VEL_C;
+        let sum_w: f64 = self.weights.iter().sum();
+        let mut result = Jones::default();
+        for (i, (r, &w)) in self.positions_enu.iter().zip(&self.weights).enumerate() {
+            if w == 0.0 {
+                continue;
+            }
+            let phasor = c64::cis(k * (ds[0] * r[0] + ds[1] * r[1] + ds[2] * r[2])) * w;
+            let e = self.element.element_response(i, freq_hz, za_rad, phi)?;
+            result += e * phasor;
+        }
+        Ok(result / sum_w)
+    }
+
+    /// Calculate the station-beam Jones matrix for a direction and pointing,
+    /// in hyperbeam's convention. See
+    /// [`SkaElementResponse::calc_jones_pair`] for the meaning of
+    /// `latitude_rad` and `iau_order`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn calc_jones_pair(
+        &self,
+        az_rad: f64,
+        za_rad: f64,
+        freq_hz: f64,
+        pointing_az_rad: f64,
+        pointing_za_rad: f64,
+        latitude_rad: Option<f64>,
+        iau_order: bool,
+    ) -> Result<Jones<f64>, SkaBeamError> {
+        let j = self.station_response(az_rad, za_rad, freq_hz, pointing_az_rad, pointing_za_rad)?;
+        Ok(everybeam_to_hyperbeam(
+            j,
+            az_rad,
+            za_rad,
+            latitude_rad,
+            iau_order,
+        ))
+    }
+
+    /// Calculate the station-beam Jones matrix for a direction and pointing
+    /// given as [`AzEl`]s. See [`calc_jones_pair`](Self::calc_jones_pair).
+    pub fn calc_jones(
+        &self,
+        azel: AzEl,
+        freq_hz: f64,
+        pointing: AzEl,
+        latitude_rad: Option<f64>,
+        iau_order: bool,
+    ) -> Result<Jones<f64>, SkaBeamError> {
+        self.calc_jones_pair(
+            azel.az,
+            azel.za(),
+            freq_hz,
+            pointing.az,
+            pointing.za(),
+            latitude_rad,
+            iau_order,
+        )
+    }
+
+    /// Calculate station-beam Jones matrices for many directions in parallel.
+    /// See [`calc_jones_pair`](Self::calc_jones_pair).
+    pub fn calc_jones_array(
+        &self,
+        azels: &[AzEl],
+        freq_hz: f64,
+        pointing: AzEl,
+        latitude_rad: Option<f64>,
+        iau_order: bool,
+    ) -> Result<Vec<Jones<f64>>, SkaBeamError> {
+        azels
+            .par_iter()
+            .map(|azel| self.calc_jones(*azel, freq_hz, pointing, latitude_rad, iau_order))
+            .collect()
+    }
+
+    /// Calculate station-beam Jones matrices for many directions in parallel.
+    /// See [`calc_jones_pair`](Self::calc_jones_pair).
+    #[allow(clippy::too_many_arguments)]
+    pub fn calc_jones_array_pair(
+        &self,
+        az_rad: &[f64],
+        za_rad: &[f64],
+        freq_hz: f64,
+        pointing_az_rad: f64,
+        pointing_za_rad: f64,
+        latitude_rad: Option<f64>,
+        iau_order: bool,
+    ) -> Result<Vec<Jones<f64>>, SkaBeamError> {
+        az_rad
+            .par_iter()
+            .zip(za_rad.par_iter())
+            .map(|(&az, &za)| {
+                self.calc_jones_pair(
+                    az,
+                    za,
+                    freq_hz,
+                    pointing_az_rad,
+                    pointing_za_rad,
+                    latitude_rad,
+                    iau_order,
+                )
+            })
+            .collect()
+    }
+}
