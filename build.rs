@@ -76,6 +76,7 @@ fn main() {
                             "get_num_unique_analytic_tiles".to_string(),
                             "free_gpu_analytic_beam".to_string(),
                             "SkaLowBeamGpu".to_string(),
+                            "SKA_GPU_MAX_L_MAX".to_string(),
                             "new_gpu_ska_low_beam".to_string(),
                             "ska_low_calc_jones_gpu".to_string(),
                             "ska_low_calc_jones_gpu_device".to_string(),
