@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10,<3.14"
-# dependencies = ["numpy", "h5py", "everybeam", "casadata", "mwa_hyperbeam"]
+# dependencies = ["numpy", "h5py", "everybeam", "python-casacore", "casadata", "mwa_hyperbeam"]
 #
 # [tool.uv.sources]
 # mwa_hyperbeam = { path = "..", editable = false }
@@ -30,10 +30,15 @@ What is compared, and how it is kept fair:
   are timed.
 - Element responses: EveryBeam's vectorised `ElementResponse.response` (its
   loop is in C++) against hyperbeam's `calc_jones_array` and the GPU.
-- Station responses (a 256-element, SKA-Low-like, rotated station): EveryBeam's
-  SKA-Low station beam (`create_telescope` + `station_response`, which can only
-  be called one direction at a time from Python) against hyperbeam's
-  `calc_station_jones_array` and the GPU. EveryBeam's fixed per-call cost (the
+- Station responses (a 256-element, SKA-Low-like, rotated station): the script
+  writes a small throwaway SKA-Low Measurement Set (TELESCOPE_NAME "SKA-LOW",
+  stations at the SKA-Low site in ITRF, each station's element offsets and
+  rotation in its PHASED_ARRAY table, as in real data), which EveryBeam loads
+  with `load_telescope` exactly as it would a real SKA-Low MS. EveryBeam's
+  `station_response` (which can only be called one direction at a time from
+  Python) is compared with hyperbeam's `calc_station_jones_array` and the GPU,
+  for all three models; a second, differently rotated station is
+  cross-checked too. EveryBeam's fixed per-call cost (the
   Python call plus its per-call setup, e.g. casacore time conversions) is
   measured with a 1-element station, and speed-ups are also given with it
   subtracted, i.e. comparing only the per-direction beam computation.
@@ -49,17 +54,8 @@ What is compared, and how it is kept fair:
   reported separately, excluding the one-off creation of the GPU context. The
   GPU precision (single or double) is reported.
 
-EveryBeam computes SKA-Low station beams with the code it uses for Measurement
-Sets whose TELESCOPE_NAME is "SKA-LOW" (internally it calls this its OSKAR
-telescope type). Here the station is built without a Measurement Set, with
-EveryBeam's `create_telescope`. In EveryBeam 0.9.1 (the newest on PyPI) that
-function has a hard-coded list of allowed element models that predates
-skalow_feko and gridded_eep (EveryBeam master adds them), so the station
-comparison with EveryBeam is for ska-low-analytic only there. The other models
-are tried, so a newer EveryBeam is used automatically. (Loading a real SKA-Low
-Measurement Set in EveryBeam is not affected by that list.) casacore may log
-warnings that its leap-second table is out of date; the benchmark does not
-depend on absolute time, so they can be ignored.
+casacore may log warnings that its leap-second table is out of date; the
+benchmark does not depend on absolute time, so they can be ignored.
 """
 
 import argparse
@@ -269,30 +265,138 @@ def eb_to_hb_order(name, j):
     return j
 
 
-def eb_station_telescope(eb, name, args, grid_file, positions, rotation):
-    """An EveryBeam SKA-Low telescope with one station (EveryBeam's OSKAR
-    telescope type, which it also uses for real SKA-Low Measurement Sets). The
-    local East, North, Up frame is used as the 'ITRF' frame, so directions are
-    ENU unit vectors."""
-    p = [np.cos(rotation), np.sin(rotation), 0.0]
-    q = [-np.sin(rotation), np.cos(rotation), 0.0]
-    axes = np.array([p, q, [0.0, 0.0, 1.0]])
-    top = eb.StationNode()
-    station = eb.StationNode(eb.StationCoordinateSystem(np.zeros(3), axes), "station")
-    for x in positions:
-        station.add_child_element(x)
-    top.add_child_node(station, np.zeros(3))
-    return eb.create_telescope(eb.TelescopeType.OSKAR, eb_options(eb, name, args, grid_file), top, np.array([0.0, 0.0]))
+# The throwaway Measurement Set's stations: (name, centre offset East/North/Up
+# [m] from the array centre, element positions, rotation [rad]). The first is
+# the benchmarked station; the second (differently rotated) is only used to
+# cross-check; the third (a single element) measures EveryBeam's per-call cost.
+SKA_LOW_SITE = (np.deg2rad(-26.82472208), np.deg2rad(116.76444824), 377.8)  # lat, lon, height
+
+
+def ms_stations():
+    return [
+        ("S1", [0.0, 0.0, 0.0], station_layout(), STATION_ROTATION),
+        ("S2", [300.0, -150.0, 0.0], station_layout(), -1.2),
+        ("S0", [0.0, 50.0, 0.0], np.zeros((1, 3)), 0.0),
+    ]
+
+
+def enu_axes_itrf():
+    """Rows: the local East, North and Up unit vectors (ITRF) at the SKA-Low
+    site."""
+    lat, lon, _ = SKA_LOW_SITE
+    e = [-np.sin(lon), np.cos(lon), 0.0]
+    n = [-np.sin(lat) * np.cos(lon), -np.sin(lat) * np.sin(lon), np.cos(lat)]
+    u = [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)]
+    return np.array([e, n, u])
+
+
+def enu_to_itrf(v):
+    return np.asarray(v) @ enu_axes_itrf()
+
+
+def site_itrf():
+    lat, lon, h = SKA_LOW_SITE
+    a, f = 6378137.0, 1 / 298.257223563
+    e2 = f * (2 - f)
+    n = a / np.sqrt(1 - e2 * np.sin(lat) ** 2)
+    return np.array([(n + h) * np.cos(lat) * np.cos(lon), (n + h) * np.cos(lat) * np.sin(lon),
+                     (n * (1 - e2) + h) * np.sin(lat)])
+
+
+def write_ska_low_ms(path, freq):
+    """Write a minimal SKA-Low Measurement Set (TELESCOPE_NAME "SKA-LOW"), with
+    each station's element offsets and rotation (COORDINATE_AXES) in its
+    PHASED_ARRAY table, as in real SKA-Low data. EveryBeam loads it through the
+    same code as a real SKA-Low MS."""
+    from casacore import tables as ct
+
+    stations = ms_stations()
+    n_st = len(stations)
+    centre = site_itrf()
+    ms = ct.default_ms(path, ct.maketabdesc(ct.makearrcoldesc("DATA", 0j, ndim=2, valuetype="complex")))
+
+    ant = ct.table(path + "/ANTENNA", readonly=False, ack=False)
+    ant.addrows(n_st)
+    ant.putcol("NAME", [st[0] for st in stations])
+    ant.putcol("STATION", [st[0] for st in stations])
+    ant.putcol("TYPE", ["GROUND-BASED"] * n_st)
+    ant.putcol("MOUNT", ["X-Y"] * n_st)
+    ant.putcol("DISH_DIAMETER", np.full(n_st, 38.0))
+    ant.putcol("POSITION", np.array([centre + enu_to_itrf(st[1]) for st in stations]))
+    ant.close()
+
+    obs = ct.table(path + "/OBSERVATION", readonly=False, ack=False)
+    obs.addrows(1)
+    obs.putcol("TELESCOPE_NAME", ["SKA-LOW"])
+    obs.close()
+
+    fld = ct.table(path + "/FIELD", readonly=False, ack=False)
+    fld.addrows(1)
+    for col in ["DELAY_DIR", "PHASE_DIR", "REFERENCE_DIR"]:
+        fld.putcol(col, np.zeros((1, 1, 2)))
+    fld.close()
+
+    spw = ct.table(path + "/SPECTRAL_WINDOW", readonly=False, ack=False)
+    spw.addrows(1)
+    spw.putcol("NUM_CHAN", np.array([1], dtype=np.int32))
+    spw.putcol("CHAN_FREQ", np.array([[freq]]))
+    for col in ["CHAN_WIDTH", "EFFECTIVE_BW", "RESOLUTION"]:
+        spw.putcol(col, np.array([[1e3]]))
+    spw.putcol("REF_FREQUENCY", np.array([freq]))
+    spw.putcol("TOTAL_BANDWIDTH", np.array([1e3]))
+    spw.close()
+
+    m = {"QuantumUnits": ["m", "m", "m"]}
+    cols = [
+        ct.makearrcoldesc("POSITION", 0.0, ndim=1, shape=[3], keywords=m),
+        ct.makearrcoldesc("COORDINATE_AXES", 0.0, ndim=2, shape=[3, 3], keywords=m),
+        ct.makearrcoldesc("ELEMENT_OFFSET", 0.0, ndim=2, keywords=m),
+        ct.makearrcoldesc("ELEMENT_FLAG", False, ndim=2),
+    ]
+    pa = ct.table(path + "/PHASED_ARRAY", ct.maketabdesc(cols), nrow=n_st, readonly=False, ack=False)
+    for i, (_, c_enu, pos, rot) in enumerate(stations):
+        pa.putcell("POSITION", i, centre + enu_to_itrf(c_enu))
+        p = enu_to_itrf([np.cos(rot), np.sin(rot), 0.0])
+        q = enu_to_itrf([-np.sin(rot), np.cos(rot), 0.0])
+        r = enu_to_itrf([0.0, 0.0, 1.0])
+        # In casacore the axes are the columns of a 3x3 matrix; python-casacore
+        # transposes, so they are rows here. Likewise ELEMENT_OFFSET is 3 x N.
+        pa.putcell("COORDINATE_AXES", i, np.array([p, q, r]))
+        pa.putcell("ELEMENT_OFFSET", i, enu_to_itrf(pos))
+        pa.putcell("ELEMENT_FLAG", i, np.zeros((len(pos), 2), dtype=bool))
+    pa.close()
+    ms.putkeyword("PHASED_ARRAY", "Table: " + os.path.abspath(path) + "/PHASED_ARRAY")
+    ms.close()
 
 
 def enu(az, za):
     return np.array([np.sin(za) * np.sin(az), np.sin(za) * np.cos(az), np.cos(za)])
 
 
-def eb_benchmarks(args, grid_file, hb_outputs):
+EB_TIME = 5e9  # MJD seconds (2017); only used by EveryBeam for its (unused here) sky rotation.
+
+
+def eb_station_reference(name, args, grid_file, station_index, az, za):
+    """hyperbeam's station response for the throwaway MS's station
+    `station_index`, in EveryBeam's convention, to compare with EveryBeam."""
+    import mwa_hyperbeam as hb
+
+    if name == "ska-low-eep-grid":
+        # EveryBeam master applies the SKA-Low conjugation/negation to gridded
+        # EEPs in SKA-Low telescopes; 0.9.1 doesn't.
+        model = hb.SkaLowEepGrid(grid_file, ska_low_convention=eb_version_tuple() > (0, 9, 1))
+    else:
+        model = hb_models(args, grid_file)[name]
+    _, _, pos, rot = ms_stations()[station_index]
+    out = model.calc_station_jones_array(az, za, args.freq, *STATION_POINTING, pos, rotation_rad=rot)
+    return out * FLIP
+
+
+def eb_benchmarks(args, grid_file, hb_outputs, ms_path):
     import everybeam as eb
 
-    results, notes, no_station = {}, [], []
+    results, notes = {}, []
+    s0 = enu_to_itrf(enu(*STATION_POINTING))
     for name in hb_models(args, grid_file):
         # Element responses.
         az, za = directions(n_dirs_for(name, args))
@@ -310,37 +414,35 @@ def eb_benchmarks(args, grid_file, hb_outputs):
             "diff_vs_hb": rel_diff(eb_to_hb_order(name, out), hb_outputs[f"element/{name}"] * FLIP),
         }
 
-        # Station responses.
-        pos = station_layout()
+        # Station responses, from the throwaway SKA-Low MS.
+        coeff = {"ska-low-eep-grid": grid_file, "ska-low-eep-sph": args.feko_dir}.get(name) or ""
         try:
-            tel = eb_station_telescope(eb, name, args, grid_file, pos, STATION_ROTATION)
-        except Exception:  # noqa: BLE001
-            no_station.append(name)
+            tel = eb.load_telescope(ms_path, element_response_model=EB_MODELS[name], coeff_path=coeff)
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"EveryBeam couldn't load the SKA-Low MS with {EB_MODELS[name]}: {e}")
             continue
         az, za = directions(args.n_station_dirs, seed=7)
-        dirs = [enu(a, z) for a, z in zip(az, za)]
-        s0 = enu(*STATION_POINTING)
-        fn = lambda: np.array([tel.station_response(0.0, 0, args.freq, d, s0, rotate=False).reshape(4) for d in dirs])
+        dirs = [enu_to_itrf(enu(a, z)) for a, z in zip(az, za)]
+        fn = lambda: np.array([tel.station_response(EB_TIME, 0, args.freq, d, s0, rotate=False).reshape(4)
+                               for d in dirs])
         first, med, out = timed(fn, args.repeats)
-        results[f"station/{name}"] = {
-            "first": first, "median": med, "n": len(az),
-            "diff_vs_hb": rel_diff(eb_to_hb_order(name, out), hb_outputs[f"station/{name}"] * FLIP),
-        }
+        diff = rel_diff(eb_to_hb_order(name, out), eb_station_reference(name, args, grid_file, 0, az, za))
+        # Also cross-check the second, differently rotated station (not timed).
+        n_check = min(200, len(az))
+        out2 = np.array([tel.station_response(EB_TIME, 1, args.freq, d, s0, rotate=False).reshape(4)
+                         for d in dirs[:n_check]])
+        diff2 = rel_diff(eb_to_hb_order(name, out2),
+                         eb_station_reference(name, args, grid_file, 1, az[:n_check], za[:n_check]))
+        results[f"station/{name}"] = {"first": first, "median": med, "n": len(az), "diff_vs_hb": max(diff, diff2)}
 
-    # EveryBeam's per-call Python overhead for station responses, measured with
-    # a 1-element analytic station.
-    tel1 = eb_station_telescope(eb, "ska-low-analytic", args, grid_file, np.zeros((1, 3)), 0.0)
+    # EveryBeam's fixed per-call cost for station responses, measured with the
+    # MS's 1-element station.
+    tel = eb.load_telescope(ms_path, element_response_model="oskar_dipole_cos")
     az, za = directions(args.n_station_dirs, seed=7)
-    dirs = [enu(a, z) for a, z in zip(az, za)]
-    s0 = enu(*STATION_POINTING)
-    _, med, _ = timed(lambda: [tel1.station_response(0.0, 0, args.freq, d, s0, rotate=False) for d in dirs], args.repeats)
+    dirs = [enu_to_itrf(enu(a, z)) for a, z in zip(az, za)]
+    _, med, _ = timed(lambda: [tel.station_response(EB_TIME, 2, args.freq, d, s0, rotate=False) for d in dirs],
+                      args.repeats)
     results["station_call_overhead_per_dir"] = med / len(dirs)
-    if no_station:
-        notes.append(f"EveryBeam {version('everybeam')}'s create_telescope (used to build the test station "
-                     "without a Measurement Set) has a hard-coded list of element models that predates "
-                     f"{', '.join(EB_MODELS[n] for n in no_station)} (EveryBeam master adds them), so the "
-                     f"{', '.join(no_station)} station rows are hyperbeam only (CPU vs GPU). This is a gap in "
-                     "that EveryBeam function only; it doesn't affect real Measurement Sets.")
     return results, notes
 
 
@@ -417,7 +519,8 @@ def main():
     print(f"- frequency: {args.freq / 1e6:g} MHz; repeats: {args.repeats} (median reported)")
     print(f"- EEP grid: {args.grid_file or 'synthetic (1 deg, 31 freqs)'}")
     print(f"- FEKO coefficients: {args.feko_dir or 'not given (ska-low-eep-sph skipped)'}")
-    print(f"- station: 256 elements (Vogel spiral, r = 19 m), rotated {STATION_ROTATION} rad, pointed at az/za {STATION_POINTING} rad\n")
+    print(f"- station: 256 elements (Vogel spiral, r = 19 m), rotated {STATION_ROTATION} rad, pointed at az/za "
+          f"{STATION_POINTING} rad; EveryBeam loads it from a throwaway SKA-Low Measurement Set\n")
 
     print("Running hyperbeam (CPU, all threads)...", file=sys.stderr)
     hb_all, hb_outputs = hb_cpu_benchmarks(args, grid_file)
@@ -440,7 +543,9 @@ def main():
 
     print("Running EveryBeam (casacore may warn about its leap-second table; that's harmless here)...",
           file=sys.stderr)
-    eb_res, eb_notes = eb_benchmarks(args, grid_file, hb_outputs)
+    ms_path = os.path.join(tmpdir, "ska_low.ms")
+    write_ska_low_ms(ms_path, args.freq)
+    eb_res, eb_notes = eb_benchmarks(args, grid_file, hb_outputs, ms_path)
 
     # Tables.
     overhead = eb_res.get("station_call_overhead_per_dir")
