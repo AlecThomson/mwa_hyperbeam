@@ -38,10 +38,14 @@ What is compared, and how it is kept fair:
   `station_response` (which can only be called one direction at a time from
   Python) is compared with hyperbeam's `calc_station_jones_array` and the GPU,
   for all three models; a second, differently rotated station is
-  cross-checked too. EveryBeam's fixed per-call cost (the
-  Python call plus its per-call setup, e.g. casacore time conversions) is
-  measured with a 1-element station, and speed-ups are also given with it
-  subtracted, i.e. comparing only the per-direction beam computation.
+  cross-checked too. Loading the MS (`load_telescope`) is not timed. EveryBeam's
+  fixed per-call cost (the
+  Python call plus building a new time-dependent point-response object, with
+  casacore ITRF frame conversions, on every call; EveryBeam's C++ users reuse
+  that object across directions) is measured with a 1-element station, and
+  speed-ups are also given with it subtracted, i.e. comparing only the beam
+  computation. That subtraction slightly favours EveryBeam, as the 1-element
+  measurement also includes evaluating one element.
 - Threads: EveryBeam's Python calls are single-threaded. hyperbeam CPU timings
   are given for 1 thread (`RAYON_NUM_THREADS=1`, in a subprocess) and for all
   threads.
@@ -588,11 +592,12 @@ def main():
                 f"{n} {gpu['results'][f'{kind}/{n}']['diff_vs_cpu']:.1e}" for n in hb_models(args, grid_file)))
         if kind == "station" and overhead is not None:
             n = args.n_station_dirs
-            print(f"\nEveryBeam computes station responses one direction per Python call. Its fixed per-call cost "
-                  f"(the Python call plus per-call setup such as casacore time conversions, measured with a "
-                  f"1-element station) is {overhead * 1e6:.1f} us per direction, i.e. {overhead * n * 1e3:.2f} ms of "
-                  f"each EveryBeam station time above. Excluding it (comparing only the per-direction beam "
-                  f"computation), the speed-ups are:")
+            print(f"\nEveryBeam computes station responses one direction per Python call (loading the MS isn't "
+                  f"timed). Each call also builds a new time-dependent point-response object, with casacore ITRF "
+                  f"frame conversions, which EveryBeam's C++ users reuse across directions. This fixed per-call cost "
+                  f"(measured with a 1-element station) is {overhead * 1e6:.1f} us per direction, i.e. "
+                  f"{overhead * n * 1e3:.2f} ms of each EveryBeam station time above. Excluding it (comparing only "
+                  f"the beam computation; this slightly favours EveryBeam), the speed-ups are:")
             for name in hb_models(args, grid_file):
                 key = f"station/{name}"
                 e = eb_res.get(key)
