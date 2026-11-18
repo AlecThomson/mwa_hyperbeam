@@ -28,7 +28,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   - CUDA/HIP support for all SKA-Low models, for single elements or whole
     stations (`SkaLowBeam::gpu_prepare` -> `SkaLowBeamGpu`, and
     `new_gpu_ska_low_beam`/`ska_low_calc_jones_gpu*` in the C FFI). Results
-    use the same `(tile, freq, direction)` layout as `FEEBeamGpu`.
+    use the same `(tile, freq, direction)` layout as `FEEBeamGpu`. Also in
+    Python (`gpu_prepare` on the SKA-Low classes, returning `SkaLowGpu`).
+  - `benches/ska_benchmark.py`, a `uv run`-able benchmark of the SKA-Low beams
+    (CPU and GPU) against EveryBeam.
 
 ## [0.14.0] - 2026-11-17
 

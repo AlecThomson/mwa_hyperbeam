@@ -26,6 +26,8 @@ fn mwa_hyperbeam(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ska::SkaLowAnalytic>()?;
     m.add_class::<ska::SkaLowEepGrid>()?;
     m.add_class::<ska::SkaLowEepSph>()?;
+    #[cfg(any(feature = "cuda", feature = "hip"))]
+    m.add_class::<ska::SkaLowGpu>()?;
     m.add("HyperbeamError", py.get_type::<HyperbeamError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 

@@ -33,7 +33,7 @@
 //! `COORDINATE_AXES` of the MS `PHASED_ARRAY` table).
 
 mod analytic;
-mod beam;
+pub(crate) mod beam;
 mod eep_grid;
 mod eep_sph;
 mod error;
@@ -103,7 +103,10 @@ pub(crate) fn parallactic_angle(az_rad: f64, za_rad: f64, latitude_rad: f64) -> 
 
 /// Evaluate `f(i)` for `i` in `0..n` in parallel into a pre-allocated vector,
 /// stopping at the first error. (This is considerably faster than collecting
-/// an iterator of `Result`s with rayon.)
+/// an iterator of `Result`s with rayon.) Work is split into chunks of at least
+/// 16 items: small enough that a few hundred expensive items (e.g. station
+/// responses) still use all threads, large enough to keep the overhead for
+/// cheap items small.
 pub(crate) fn par_map_jones<F>(n: usize, f: F) -> Result<Vec<Jones<f64>>, SkaBeamError>
 where
     F: Fn(usize) -> Result<Jones<f64>, SkaBeamError> + Sync + Send,
@@ -111,7 +114,7 @@ where
     let mut out = vec![Jones::default(); n];
     out.par_iter_mut()
         .enumerate()
-        .with_min_len(256)
+        .with_min_len(16)
         .try_for_each(|(i, o)| {
             *o = f(i)?;
             Ok::<(), SkaBeamError>(())

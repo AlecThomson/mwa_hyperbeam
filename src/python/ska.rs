@@ -12,9 +12,11 @@ use num_complex::Complex64 as c64;
 use numpy::*;
 use pyo3::prelude::*;
 
-use crate::ska::{
-    SkaElementResponse, SkaLowAnalytic as SkaLowAnalyticRust, SkaLowEepGrid as SkaLowEepGridRust,
-    SkaLowEepSph as SkaLowEepSphRust, SkaStation,
+use crate::ska::{beam::SkaLowBeamInner, SkaElementResponse, SkaLowBeam, SkaStation};
+#[cfg(any(feature = "cuda", feature = "hip"))]
+use crate::{
+    ska::{SkaGpuTiles, SkaLowBeamGpu},
+    GpuComplex, GpuFloat,
 };
 
 /// Borrow a 1D array as a slice, copying only if it isn't contiguous.
@@ -37,11 +39,11 @@ fn jones_vec_to_py<'py>(py: Python<'py>, js: Vec<Jones<f64>>) -> Bound<'py, PyAr
 /// Generate a Python class for an SKA element model. All classes share the
 /// same calculation methods; the constructor is supplied per class.
 macro_rules! ska_py_class {
-    ($(#[$meta:meta])* $name:ident, $rust:ty, { $($ctor:tt)* }) => {
+    ($(#[$meta:meta])* $name:ident, { $($ctor:tt)* }) => {
         $(#[$meta])*
         #[pyclass]
         pub(super) struct $name {
-            beam: $rust,
+            beam: SkaLowBeam,
         }
 
         #[pymethods]
@@ -189,8 +191,110 @@ macro_rules! ska_py_class {
                 })?;
                 Ok(jones_vec_to_py(py, js))
             }
+
+            /// Prepare the GPU for beam-response calculations at the given
+            /// frequencies [Hz], returning an `SkaLowGpu` object. Each "tile"
+            /// is either a single element (the default; `element_ids` gives
+            /// the element of each tile for models with per-element
+            /// patterns, else one tile of element 0), or, if `positions_enu`
+            /// is given (shape (N_stations, N_elements, 3), East/North/Up in
+            /// metres), a station. Station `weights` (shape (N_stations,
+            /// N_elements)) default to 1, and `rotations_rad` (one per
+            /// station) to 0.
+            #[cfg(any(feature = "cuda", feature = "hip"))]
+            #[pyo3(signature = (freqs_hz, element_ids=None, positions_enu=None, weights=None, rotations_rad=None))]
+            fn gpu_prepare(
+                &self,
+                freqs_hz: Vec<f64>,
+                element_ids: Option<Vec<usize>>,
+                positions_enu: Option<PyReadonlyArray3<f64>>,
+                weights: Option<PyReadonlyArray2<f64>>,
+                rotations_rad: Option<Vec<f64>>,
+            ) -> PyResult<SkaLowGpu> {
+                let ids = element_ids.unwrap_or_else(|| vec![0]);
+                let positions = positions_enu.as_ref().map(|p| p.as_array());
+                let weights = weights.as_ref().map(|w| w.as_array());
+                let tiles = match positions {
+                    Some(p) => {
+                        if p.len_of(Axis(2)) != 3 {
+                            return Err(pyo3::exceptions::PyValueError::new_err(
+                                "positions_enu must have shape (N_stations, N_elements, 3)",
+                            ));
+                        }
+                        SkaGpuTiles::Stations {
+                            positions_enu: p,
+                            weights,
+                            rotations_rad: rotations_rad.as_deref(),
+                        }
+                    }
+                    None => SkaGpuTiles::Elements(&ids),
+                };
+                let gpu = unsafe { self.beam.gpu_prepare(&freqs_hz, tiles) }?;
+                Ok(SkaLowGpu { gpu })
+            }
         }
     };
+}
+
+/// A GPU SKA-Low beam, prepared with `gpu_prepare` on one of the SKA-Low
+/// beam classes.
+#[cfg(any(feature = "cuda", feature = "hip"))]
+#[pyclass]
+pub(super) struct SkaLowGpu {
+    gpu: SkaLowBeamGpu,
+}
+
+#[cfg(any(feature = "cuda", feature = "hip"))]
+#[pymethods]
+impl SkaLowGpu {
+    /// Calculate beam-response Jones matrices on the GPU for many directions
+    /// (azimuth North through East, zenith angle; radians). Returns an array
+    /// with shape (N_tiles, N_freqs, N_directions, 4), in the same convention
+    /// as `calc_jones`. The pointing is only used for stations. The complex
+    /// type is single or double precision, depending on how hyperbeam was
+    /// compiled.
+    #[pyo3(signature = (az_rad, za_rad, pointing_az_rad=0.0, pointing_za_rad=0.0, latitude_rad=None, iau_order=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn calc_jones<'py>(
+        &self,
+        py: Python<'py>,
+        az_rad: PyArrayLike1<'py, f64, AllowTypeChange>,
+        za_rad: PyArrayLike1<'py, f64, AllowTypeChange>,
+        pointing_az_rad: f64,
+        pointing_za_rad: f64,
+        latitude_rad: Option<f64>,
+        iau_order: Option<bool>,
+    ) -> PyResult<Bound<'py, PyArray4<GpuComplex>>> {
+        let az: Vec<GpuFloat> = az_rad.as_array().iter().map(|&x| x as GpuFloat).collect();
+        let za: Vec<GpuFloat> = za_rad.as_array().iter().map(|&x| x as GpuFloat).collect();
+        if az.len() != za.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "az_rad and za_rad must have the same length",
+            ));
+        }
+        let pointing = marlu::AzEl::from_radians(
+            pointing_az_rad,
+            std::f64::consts::FRAC_PI_2 - pointing_za_rad,
+        );
+        let results = py.detach(|| {
+            self.gpu
+                .calc_jones_pair(&az, &za, pointing, latitude_rad, iau_order.unwrap_or(false))
+        })?;
+        let (nt, nf, nd) = results.dim();
+        let flat: Vec<GpuComplex> = results.iter().flat_map(|j| j.to_complex_array()).collect();
+        let arr = Array4::from_shape_vec((nt, nf, nd, 4), flat).expect("correct shape");
+        Ok(arr.into_pyarray(py))
+    }
+
+    /// The number of tiles (elements or stations).
+    fn get_num_tiles(&self) -> i32 {
+        self.gpu.get_num_tiles()
+    }
+
+    /// The number of frequencies.
+    fn get_num_freqs(&self) -> i32 {
+        self.gpu.get_num_freqs()
+    }
 }
 
 ska_py_class!(
@@ -199,17 +303,13 @@ ska_py_class!(
     /// EveryBeam's `oskar_dipole_cos` model (or `oskar_dipole` with
     /// `cos_taper=False`).
     SkaLowAnalytic,
-    SkaLowAnalyticRust,
     {
         #[new]
         #[pyo3(signature = (cos_taper=true))]
         fn new(cos_taper: bool) -> Self {
-            let beam = if cos_taper {
-                SkaLowAnalyticRust::new()
-            } else {
-                SkaLowAnalyticRust::new_without_taper()
-            };
-            Self { beam }
+            Self {
+                beam: SkaLowBeam::new_analytic(cos_taper),
+            }
         }
     }
 );
@@ -222,28 +322,26 @@ ska_py_class!(
     /// `ska_low_convention` (default True) applies EveryBeam's OSKAR/SKA-Low
     /// conjugation and negation.
     SkaLowEepGrid,
-    SkaLowEepGridRust,
     {
         #[new]
         #[pyo3(signature = (hdf5_file=None, ska_low_convention=true))]
         fn new(hdf5_file: Option<PathBuf>, ska_low_convention: bool) -> PyResult<Self> {
-            let beam = match hdf5_file {
-                Some(f) => SkaLowEepGridRust::new_with_convention(f, ska_low_convention)?,
-                None => {
-                    if !ska_low_convention {
-                        return Err(pyo3::exceptions::PyValueError::new_err(
-                            "ska_low_convention=False requires an explicit hdf5_file",
-                        ));
-                    }
-                    SkaLowEepGridRust::new_from_env()?
-                }
-            };
-            Ok(Self { beam })
+            if hdf5_file.is_none() && !ska_low_convention {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "ska_low_convention=False requires an explicit hdf5_file",
+                ));
+            }
+            Ok(Self {
+                beam: SkaLowBeam::new_eep_grid(hdf5_file, ska_low_convention)?,
+            })
         }
 
         /// The frequencies of the grid [Hz].
         fn get_freqs(&self) -> Vec<f64> {
-            self.beam.get_freqs().to_vec()
+            match &self.beam.inner {
+                SkaLowBeamInner::EepGrid(b) => b.get_freqs().to_vec(),
+                _ => unreachable!(),
+            }
         }
     }
 );
@@ -257,21 +355,21 @@ ska_py_class!(
     /// `$EVERYBEAM_DATADIR/skalow`. `l_max` optionally truncates the
     /// spherical-wave expansion.
     SkaLowEepSph,
-    SkaLowEepSphRust,
     {
         #[new]
         #[pyo3(signature = (coeff_dir=None, l_max=None))]
         fn new(coeff_dir: Option<PathBuf>, l_max: Option<usize>) -> PyResult<Self> {
-            let beam = match coeff_dir {
-                Some(d) => SkaLowEepSphRust::new_with_l_max(d, l_max)?,
-                None => SkaLowEepSphRust::new_from_env()?,
-            };
-            Ok(Self { beam })
+            Ok(Self {
+                beam: SkaLowBeam::new_eep_sph(coeff_dir, l_max)?,
+            })
         }
 
         /// The frequencies of the available coefficient files [Hz].
         fn get_freqs(&self) -> Vec<f64> {
-            self.beam.get_freqs()
+            match &self.beam.inner {
+                SkaLowBeamInner::EepSph(b) => b.get_freqs(),
+                _ => unreachable!(),
+            }
         }
 
         /// The number of elements (with distinct patterns).
@@ -281,7 +379,10 @@ ska_py_class!(
 
         /// The frequency of the coefficients used for `freq_hz` [Hz].
         fn find_closest_freq(&self, freq_hz: f64) -> f64 {
-            self.beam.find_closest_freq(freq_hz)
+            match &self.beam.inner {
+                SkaLowBeamInner::EepSph(b) => b.find_closest_freq(freq_hz),
+                _ => unreachable!(),
+            }
         }
     }
 );

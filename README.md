@@ -106,6 +106,13 @@ given element positions and each station's rotation about the local vertical
 `SkaLowBeam::gpu_prepare`, for single elements or whole stations, with the same
 result layout as `FEEBeamGpu`.
 
+To benchmark them (CPU and GPU) against EveryBeam on your machine, see
+`benches/ska_benchmark.py`, e.g.
+
+```bash
+MATURIN_PEP517_ARGS="--features python,cuda,hdf5-static" uv run benches/ska_benchmark.py --feko-dir /path/to/EveryBeam/coeffs/skalow
+```
+
 ```python
 >>> import numpy as np, mwa_hyperbeam
 >>> beam = mwa_hyperbeam.SkaLowEepGrid("oskar_eep_grid.h5")
