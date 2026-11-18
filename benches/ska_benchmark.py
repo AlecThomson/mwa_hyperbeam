@@ -53,6 +53,12 @@ What is compared, and how it is kept fair:
   median of `--repeats` calls. hyperbeam caches the frequency-interpolated EEP
   grid and the FEKO coefficients in memory; EveryBeam reads FEKO coefficients
   from HDF5 on each call. The warm-up ("first call") times are reported too.
+- Batched station responses: EveryBeam's `gridded_response` (its batched C++
+  path, multi-threaded over image rows) on a sky grid around the MS's delay
+  direction, against hyperbeam CPU and GPU on exactly the same directions (with
+  hyperbeam's parallactic-angle correction, as EveryBeam applies its sky
+  rotation). Both are timed on one core and on all cores; the MS is padded
+  with 1-element stations so that EveryBeam can use every core.
 - GPU: times include copying the directions to the device and the results back
   (and into a NumPy array). Preparing the GPU (`gpu_prepare`, done once) is
   reported separately, excluding the one-off creation of the GPU context. The
@@ -87,10 +93,15 @@ def parse_args():
     p.add_argument("--n-dirs", type=int, default=100_000, help="Directions for the analytic and grid element benchmarks.")
     p.add_argument("--n-sph-dirs", type=int, default=20_000, help="Directions for the spherical-wave element benchmark.")
     p.add_argument("--n-station-dirs", type=int, default=2_000, help="Directions for the station benchmarks.")
+    p.add_argument("--grid-size", type=int, default=64, help="Pixels per side of the sky grid for the batched station benchmark (EveryBeam's gridded_response).")
+    p.add_argument("--skip-batched", action="store_true", help="Skip the batched station benchmark.")
     p.add_argument("--repeats", type=int, default=5, help="Timed repeats per measurement (median reported).")
     p.add_argument("--json", help="Also write the results to this JSON file.")
     p.add_argument("--no-gpu", action="store_true", help="Skip the GPU even if hyperbeam was built with it.")
     p.add_argument("--_worker", help=argparse.SUPPRESS)
+    p.add_argument("--_batched-worker", help=argparse.SUPPRESS)
+    p.add_argument("--_ms", help=argparse.SUPPRESS)
+    p.add_argument("--_one-core", action="store_true", help=argparse.SUPPRESS)
     return p.parse_args()
 
 
@@ -277,11 +288,18 @@ SKA_LOW_SITE = (np.deg2rad(-26.82472208), np.deg2rad(116.76444824), 377.8)  # la
 
 
 def ms_stations():
-    return [
+    stations = [
         ("S1", [0.0, 0.0, 0.0], station_layout(), STATION_ROTATION),
         ("S2", [300.0, -150.0, 0.0], station_layout(), -1.2),
         ("S0", [0.0, 50.0, 0.0], np.zeros((1, 3)), 0.0),
     ]
+    # EveryBeam's gridded_response uses min(CPUs, number of stations in the
+    # telescope) threads, so pad with 1-element stations until there are at
+    # least as many stations as CPUs (as in real SKA-Low data, which has 512).
+    n_cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    for i in range(max(0, n_cpus - len(stations))):
+        stations.append((f"F{i}", [100.0 + 5.0 * i, 100.0, 0.0], np.zeros((1, 3)), 0.0))
+    return stations
 
 
 def enu_axes_itrf():
@@ -307,7 +325,7 @@ def site_itrf():
                      (n * (1 - e2) + h) * np.sin(lat)])
 
 
-def write_ska_low_ms(path, freq):
+def write_ska_low_ms(path, freq, delay_dir=(0.0, 0.0)):
     """Write a minimal SKA-Low Measurement Set (TELESCOPE_NAME "SKA-LOW"), with
     each station's element offsets and rotation (COORDINATE_AXES) in its
     PHASED_ARRAY table, as in real SKA-Low data. EveryBeam loads it through the
@@ -337,7 +355,7 @@ def write_ska_low_ms(path, freq):
     fld = ct.table(path + "/FIELD", readonly=False, ack=False)
     fld.addrows(1)
     for col in ["DELAY_DIR", "PHASE_DIR", "REFERENCE_DIR"]:
-        fld.putcol(col, np.zeros((1, 1, 2)))
+        fld.putcol(col, np.array(delay_dir, dtype=float).reshape(1, 1, 2))
     fld.close()
 
     spw = ct.table(path + "/SPECTRAL_WINDOW", readonly=False, ack=False)
@@ -380,7 +398,7 @@ def enu(az, za):
 EB_TIME = 5e9  # MJD seconds (2017); only used by EveryBeam for its (unused here) sky rotation.
 
 
-def eb_station_reference(name, args, grid_file, station_index, az, za):
+def eb_station_reference(name, args, grid_file, station_index, az, za, pointing=STATION_POINTING):
     """hyperbeam's station response for the throwaway MS's station
     `station_index`, in EveryBeam's convention, to compare with EveryBeam."""
     import mwa_hyperbeam as hb
@@ -392,7 +410,7 @@ def eb_station_reference(name, args, grid_file, station_index, az, za):
     else:
         model = hb_models(args, grid_file)[name]
     _, _, pos, rot = ms_stations()[station_index]
-    out = model.calc_station_jones_array(az, za, args.freq, *STATION_POINTING, pos, rotation_rad=rot)
+    out = model.calc_station_jones_array(az, za, args.freq, *pointing, pos, rotation_rad=rot)
     return out * FLIP
 
 
@@ -450,6 +468,147 @@ def eb_benchmarks(args, grid_file, hb_outputs, ms_path):
     return results, notes
 
 
+# -----------------------------------------------------------------------------
+# Batched station responses: EveryBeam's gridded_response
+# -----------------------------------------------------------------------------
+
+BATCH_TIME = 5.2e9  # MJD seconds (2023)
+
+
+def make_radec_to_itrf(t):
+    """J2000 (RA, Dec) -> ITRF unit vector, exactly as EveryBeam's ItrfConverter
+    does it (casacore, epoch `t`, and EveryBeam's fixed reference position,
+    which EveryBeam 0.9.1 has without the leading '3' that master fixed)."""
+    from casacore.measures import measures
+    from casacore.quanta import quantity
+
+    dm = measures()
+    x = 826577.022720000 if eb_version_tuple() <= (0, 9, 1) else 3826577.022720000
+    dm.do_frame(dm.position("itrf", f"{x}m", "461022.995082m", "5064892.814m"))
+    dm.do_frame(dm.epoch("utc", quantity(t, "s")))
+
+    def f(ra, dec):
+        d = dm.measure(dm.direction("J2000", quantity(ra, "rad"), quantity(dec, "rad")), "ITRF")
+        lon, lat = d["m0"]["value"], d["m1"]["value"]
+        return np.array([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
+
+    return f
+
+
+def itrf_to_azza(v):
+    """(az, za) of ITRF direction vectors, which needn't be unit length
+    (EveryBeam's gridded pixel directions aren't exactly: see
+    batched_geometry)."""
+    e, n, u = enu_axes_itrf() @ np.asarray(v).T
+    return np.arctan2(e, n) % (2 * np.pi), np.arctan2(np.hypot(e, n), u)
+
+
+def batched_geometry(args):
+    """The sky grid used by EveryBeam's gridded_response, as (az, za) for
+    hyperbeam, plus the pointing (the MS delay direction) and the vectors
+    EveryBeam uses for its sky rotation."""
+    from casacore.measures import measures
+    from casacore.quanta import quantity
+
+    # Point 0.15 rad from the zenith at BATCH_TIME.
+    dm = measures()
+    lat, lon, h = SKA_LOW_SITE
+    dm.do_frame(dm.position("wgs84", quantity(lon, "rad"), quantity(lat, "rad"), quantity(h, "m")))
+    dm.do_frame(dm.epoch("utc", quantity(BATCH_TIME, "s")))
+    z = dm.measure(dm.direction("AZEL", "0rad", quantity(np.pi / 2, "rad")), "J2000")
+    ra, dec = z["m0"]["value"], z["m1"]["value"] + 0.15
+
+    to_itrf = make_radec_to_itrf(BATCH_TIME)
+    lvec, mvec, nvec = to_itrf(ra + np.pi / 2, 0.0), to_itrf(ra, dec + np.pi / 2), to_itrf(ra, dec)
+    ncp = to_itrf(0.0, np.pi / 2)
+
+    # aocommon::ImageCoordinates::XYToLM, row-major [y][x]. +/- 40 deg in l, m.
+    size = args.grid_size
+    dl = 2 * np.sin(np.deg2rad(40)) / size
+    x, y = np.meshgrid(np.arange(size), np.arange(size))
+    l = (size / 2 - x.ravel()) * dl
+    m = (y.ravel() - size / 2) * dl
+    n = np.sqrt(1 - l * l - m * m)
+    # Exactly as EveryBeam does it. As the basis vectors are converted to ITRF
+    # separately (with aberration), they aren't exactly orthonormal, so these
+    # directions aren't exactly unit length (to ~1e-4).
+    dirs = l[:, None] * lvec + m[:, None] * mvec + n[:, None] * nvec
+    az, za = itrf_to_azza(dirs)
+    paz, pza = itrf_to_azza(nvec[None, :])
+    return {"ra": ra, "dec": dec, "dl": dl, "size": size, "dirs": dirs, "az": az, "za": za,
+            "pointing": (float(paz[0]), float(pza[0])), "ncp": ncp}
+
+
+def eb_sky_rotation(j, dirs, ncp):
+    """Apply EveryBeam's `rotate` (its gridded_response always does): project
+    the theta/phi columns onto sky north/east (from the celestial pole)."""
+    enu = enu_axes_itrf()
+    d = dirs @ enu.T
+    east = np.cross(ncp, dirs)
+    east /= np.linalg.norm(east, axis=1)[:, None]
+    north = np.cross(dirs, east)
+    east, north = east @ enu.T, north @ enu.T
+    e_phi = np.stack([-d[:, 1], d[:, 0], np.zeros(len(d))], axis=1)
+    e_phi /= np.linalg.norm(e_phi, axis=1)[:, None]
+    e_theta = np.cross(e_phi, d)
+    rot = np.stack([np.sum(e_theta * north, 1), np.sum(e_theta * east, 1),
+                    np.sum(e_phi * north, 1), np.sum(e_phi * east, 1)], axis=1).reshape(-1, 2, 2)
+    return np.einsum("nij,njk->nik", np.asarray(j).reshape(-1, 2, 2), rot).reshape(-1, 4)
+
+
+def batched_benchmarks(args, grid_file, ms_path):
+    """hyperbeam CPU vs EveryBeam's gridded_response on the same sky grid (run
+    in a subprocess, with either all cores or one)."""
+    import everybeam as eb
+
+    geom = batched_geometry(args)
+    az, za, pointing = geom["az"], geom["za"], geom["pointing"]
+    lat = SKA_LOW_SITE[0]
+    _, _, pos, rot = ms_stations()[0]
+    gs = eb.GridSettings()
+    gs.ra, gs.dec, gs.width, gs.height = geom["ra"], geom["dec"], geom["size"], geom["size"]
+    gs.dl, gs.dm, gs.l_shift, gs.m_shift = geom["dl"], geom["dl"], 0.0, 0.0
+
+    results = {}
+    for name, m in hb_models(args, grid_file).items():
+        first, med, _ = timed(lambda: m.calc_station_jones_array(
+            az, za, args.freq, *pointing, pos, rotation_rad=rot, latitude_rad=lat, iau_order=True), args.repeats)
+        r = {"n": len(az), "hb_first": first, "hb_median": med}
+        coeff = {"ska-low-eep-grid": grid_file, "ska-low-eep-sph": args.feko_dir}.get(name) or ""
+        try:
+            tel = eb.load_telescope(ms_path, element_response_model=EB_MODELS[name], coeff_path=coeff)
+            reps = args.repeats if name != "ska-low-eep-sph" else min(args.repeats, 2)
+            first, med, out = timed(lambda: tel.gridded_response(gs, BATCH_TIME, args.freq, 0), reps)
+            r.update({"eb_first": first, "eb_median": med})
+            if not args._one_core:
+                # hyperbeam's raw station response, put in this EveryBeam's
+                # correlation order (eb_to_hb_order is its own inverse), then
+                # EveryBeam's sky rotation applied.
+                raw = eb_to_hb_order(name, eb_station_reference(name, args, grid_file, 0, az, za, pointing))
+                ref = eb_sky_rotation(raw, geom["dirs"], geom["ncp"])
+                r["diff"] = rel_diff(out, ref)
+        except Exception as e:  # noqa: BLE001
+            r["eb_error"] = str(e)
+        results[name] = r
+    return results
+
+
+def batched_gpu(args, grid_file):
+    import mwa_hyperbeam as hb
+
+    if not hasattr(hb, "SkaLowGpu"):
+        return None
+    geom = batched_geometry(args)
+    _, _, pos, rot = ms_stations()[0]
+    out = {}
+    for name, m in hb_models(args, grid_file).items():
+        gpu = m.gpu_prepare([args.freq], positions_enu=pos[np.newaxis], rotations_rad=[rot])
+        first, med, _ = timed(lambda: gpu.calc_jones(geom["az"], geom["za"], *geom["pointing"],
+                                                     latitude_rad=SKA_LOW_SITE[0], iau_order=True), args.repeats)
+        out[name] = {"first": first, "median": med}
+    return out
+
+
 def setup_casacore_data():
     """EveryBeam's station code uses casacore measures (leap seconds); point
     casacore at the measures data from the `casadata` package."""
@@ -498,8 +657,18 @@ def main():
     args = parse_args()
     tmpdir = tempfile.mkdtemp(prefix="ska_benchmark_")
     grid_file = args.grid_file or os.path.join(tmpdir, "synthetic_eep_grid.h5")
-    if not args.grid_file and args._worker is None:
+    if not args.grid_file and args._worker is None and args._batched_worker is None:
         make_synthetic_grid(grid_file)
+
+    if args._batched_worker:
+        # Subprocess: the batched station benchmark, with all cores or (for
+        # both hyperbeam and EveryBeam, which counts CPUs from the affinity
+        # mask) just one.
+        if args._one_core and hasattr(os, "sched_setaffinity"):
+            os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})
+        res = batched_benchmarks(args, args._batched_worker, args._ms)
+        print(json.dumps(res))
+        return
 
     if args._worker:
         # Subprocess: hyperbeam CPU timings only (with RAYON_NUM_THREADS set by
@@ -548,8 +717,26 @@ def main():
     print("Running EveryBeam (casacore may warn about its leap-second table; that's harmless here)...",
           file=sys.stderr)
     ms_path = os.path.join(tmpdir, "ska_low.ms")
-    write_ska_low_ms(ms_path, args.freq)
+    geom = batched_geometry(args)
+    write_ska_low_ms(ms_path, args.freq, delay_dir=(geom["ra"], geom["dec"]))
     eb_res, eb_notes = eb_benchmarks(args, grid_file, hb_outputs, ms_path)
+
+    batched = None
+    if not args.skip_batched:
+        batched = {}
+        base = [sys.executable, os.path.abspath(__file__), "--_batched-worker", grid_file, "--_ms", ms_path,
+                "--freq", str(args.freq), "--grid-size", str(args.grid_size), "--repeats", str(args.repeats)]
+        if args.feko_dir:
+            base += ["--feko-dir", args.feko_dir]
+        for label, extra, env in [("one", ["--_one-core"], {"RAYON_NUM_THREADS": "1"}), ("all", [], {})]:
+            print(f"Running the batched station benchmark ({label} core{'s' if label == 'all' else ''})...",
+                  file=sys.stderr)
+            proc = subprocess.run(base + extra, capture_output=True, text=True, env={**os.environ, **env})
+            if proc.returncode != 0:
+                sys.exit(f"Batched worker failed:\n{proc.stderr}")
+            batched[label] = json.loads(proc.stdout.strip().splitlines()[-1])
+        if gpu:
+            batched["gpu"] = batched_gpu(args, grid_file)
 
     # Tables.
     overhead = eb_res.get("station_call_overhead_per_dir")
@@ -613,6 +800,54 @@ def main():
                 print(f"- {name}: EveryBeam {adj * 1e3:.2f} ms -> " + " / ".join(f"{x:.1f}x" for x in sp)
                       + " (1 thread / all threads" + (" / GPU)" if gpu else ")"))
 
+    if batched:
+        n_cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+        print(f"\n## Station responses, batched: EveryBeam's gridded_response ({args.grid_size}x{args.grid_size} sky grid, "
+              f"256 elements, rotated)\n")
+        hdr = ("| model | directions | EveryBeam 1 core [ms] | EveryBeam all cores [ms] | hyperbeam CPU 1 thread [ms] "
+               "| hyperbeam CPU all threads [ms] |")
+        sep = "|---|---|---|---|---|---|"
+        if batched.get("gpu"):
+            hdr += f" hyperbeam GPU ({gpu['precision']}) [ms] |"
+            sep += "---|"
+        hdr += " speed-up (1 core / all cores" + (" / GPU vs all cores" if batched.get("gpu") else "") + ") | max rel. diff vs EveryBeam |"
+        sep += "---|---|"
+        print(hdr)
+        print(sep)
+        for name in hb_models(args, grid_file):
+            one, a = batched["one"][name], batched["all"][name]
+            g = (batched.get("gpu") or {}).get(name)
+            row = (f"| {name} | {a['n']:,} | {fmt_ms(one.get('eb_median'))} | {fmt_ms(a.get('eb_median'))} | "
+                   f"{fmt_ms(one['hb_median'])} | {fmt_ms(a['hb_median'])} |")
+            if batched.get("gpu"):
+                row += f" {fmt_ms(g['median'])} |"
+            if "eb_median" in a:
+                sp = [one["eb_median"] / one["hb_median"], a["eb_median"] / a["hb_median"]]
+                if g:
+                    sp.append(a["eb_median"] / g["median"])
+                row += " " + " / ".join(f"{x:.1f}x" for x in sp) + f" | {a.get('diff', float('nan')):.1e} |"
+            else:
+                row += f" — | — |"
+            print(row)
+        print(f"\nThis is EveryBeam's batched C++ path (no per-direction Python calls): the station beam on an image "
+              f"grid of sky directions around the MS's delay direction, at one time, with EveryBeam's sky rotation "
+              f"(it always applies it). hyperbeam computes the same directions (derived with the same J2000->ITRF "
+              f"conversion as EveryBeam) with its parallactic-angle correction, i.e. equivalent work. EveryBeam "
+              f"spreads the work over min(CPUs, stations in the MS) threads; the MS is padded so that is all "
+              f"{n_cores} cores. For the 1-core columns both run pinned to a single CPU.")
+        print("\nAgreement: EveryBeam builds each pixel direction as l*L + m*M + n*N from basis vectors that it "
+              "converts to ITRF separately; with aberration they aren't exactly orthonormal, so its pixel directions "
+              "aren't exactly unit length (by up to ~1e-4), which perturbs its array-factor phases by ~1e-5. "
+              "hyperbeam uses exact unit directions. (Given the same, unit-length directions, EveryBeam and "
+              "hyperbeam agree to ~1e-15; see the per-direction table.)")
+        if "ska-low-eep-sph" in batched["all"] and "eb_median" in batched["all"]["ska-low-eep-sph"]:
+            print("\nEveryBeam's ska-low-eep-sph reads each element's FEKO coefficients from HDF5 on every "
+                  "evaluation, behind a lock unless its HDF5 is thread-safe, so it may not speed up (or may slow "
+                  "down) with more cores.")
+        for name in hb_models(args, grid_file):
+            if "eb_error" in batched["all"][name]:
+                print(f"- {name}: EveryBeam failed: {batched['all'][name]['eb_error']}")
+
     notes = []
     if gpu_note:
         notes.append(f"GPU skipped: {gpu_note}")
@@ -628,7 +863,7 @@ def main():
 
     if args.json:
         with open(args.json, "w") as f:
-            json.dump({"system": info, "args": vars(args), "everybeam": eb_res,
+            json.dump({"system": info, "args": vars(args), "everybeam": eb_res, "batched": batched,
                        "hyperbeam_cpu_all": hb_all, "hyperbeam_cpu_1": hb_one, "hyperbeam_gpu": gpu,
                        "notes": notes}, f, indent=2)
         print(f"\nWrote {args.json}", file=sys.stderr)
