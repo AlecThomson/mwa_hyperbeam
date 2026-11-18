@@ -31,8 +31,8 @@ What is compared, and how it is kept fair:
 - Element responses: EveryBeam's vectorised `ElementResponse.response` (its
   loop is in C++) against hyperbeam's `calc_jones_array` and the GPU.
 - Station responses (a 256-element, SKA-Low-like, rotated station): EveryBeam's
-  OSKAR telescope (`create_telescope` + `station_response`, which can only be
-  called one direction at a time from Python) against hyperbeam's
+  SKA-Low station beam (`create_telescope` + `station_response`, which can only
+  be called one direction at a time from Python) against hyperbeam's
   `calc_station_jones_array` and the GPU. EveryBeam's fixed per-call cost (the
   Python call plus its per-call setup, e.g. casacore time conversions) is
   measured with a 1-element station, and speed-ups are also given with it
@@ -46,13 +46,17 @@ What is compared, and how it is kept fair:
   from HDF5 on each call. The warm-up ("first call") times are reported too.
 - GPU: times include copying the directions to the device and the results back
   (and into a NumPy array). Preparing the GPU (`gpu_prepare`, done once) is
-  reported separately. The GPU precision (single or double) is reported.
+  reported separately, excluding the one-off creation of the GPU context. The
+  GPU precision (single or double) is reported.
 
-EveryBeam 0.9.1 (the newest on PyPI) can only build OSKAR stations with its
-dipole models, so station comparisons with EveryBeam are for the analytic model
-only (the others are tried, in case a newer EveryBeam supports them). casacore
-may log warnings that its leap-second table is out of date; the benchmark does
-not depend on absolute time, so they can be ignored.
+EveryBeam computes SKA-Low station beams with the code it uses for Measurement
+Sets whose TELESCOPE_NAME is "SKA-LOW" (internally it calls this its OSKAR
+telescope type). Without a Measurement Set, EveryBeam 0.9.1 (the newest on
+PyPI) can only build such a station with the analytic dipole model, so the
+station comparison with EveryBeam is for ska-low-analytic only; the other
+models are tried in case a newer EveryBeam allows them. casacore may log
+warnings that its leap-second table is out of date; the benchmark does not
+depend on absolute time, so they can be ignored.
 """
 
 import argparse
@@ -199,6 +203,9 @@ def hb_gpu_benchmarks(args, grid_file, cpu_outputs):
     results = {}
     pos = station_layout()
     precision = None
+    # Create the GPU context first; it's a one-off per process, not part of
+    # preparing any model.
+    hb.SkaLowAnalytic().gpu_prepare([args.freq]).calc_jones([0.1], [0.1])
     for name, m in hb_models(args, grid_file).items():
         az, za = directions(n_dirs_for(name, args))
         t = time.perf_counter()
@@ -260,8 +267,10 @@ def eb_to_hb_order(name, j):
 
 
 def eb_station_telescope(eb, name, args, grid_file, positions, rotation):
-    """An EveryBeam OSKAR telescope with one station. The local East, North, Up
-    frame is used as the 'ITRF' frame, so directions are ENU unit vectors."""
+    """An EveryBeam SKA-Low telescope with one station (EveryBeam's OSKAR
+    telescope type, which it also uses for real SKA-Low Measurement Sets). The
+    local East, North, Up frame is used as the 'ITRF' frame, so directions are
+    ENU unit vectors."""
     p = [np.cos(rotation), np.sin(rotation), 0.0]
     q = [-np.sin(rotation), np.cos(rotation), 0.0]
     axes = np.array([p, q, [0.0, 0.0, 1.0]])
@@ -280,7 +289,7 @@ def enu(az, za):
 def eb_benchmarks(args, grid_file, hb_outputs):
     import everybeam as eb
 
-    results, notes = {}, []
+    results, notes, no_station = {}, [], []
     for name in hb_models(args, grid_file):
         # Element responses.
         az, za = directions(n_dirs_for(name, args))
@@ -302,8 +311,8 @@ def eb_benchmarks(args, grid_file, hb_outputs):
         pos = station_layout()
         try:
             tel = eb_station_telescope(eb, name, args, grid_file, pos, STATION_ROTATION)
-        except Exception as e:  # noqa: BLE001
-            notes.append(f"EveryBeam {version('everybeam')} can't make an OSKAR station with {EB_MODELS[name]}: {e}")
+        except Exception:  # noqa: BLE001
+            no_station.append(name)
             continue
         az, za = directions(args.n_station_dirs, seed=7)
         dirs = [enu(a, z) for a, z in zip(az, za)]
@@ -323,6 +332,10 @@ def eb_benchmarks(args, grid_file, hb_outputs):
     s0 = enu(*STATION_POINTING)
     _, med, _ = timed(lambda: [tel1.station_response(0.0, 0, args.freq, d, s0, rotate=False) for d in dirs], args.repeats)
     results["station_call_overhead_per_dir"] = med / len(dirs)
+    if no_station:
+        notes.append(f"EveryBeam {version('everybeam')} can't build a station beam with "
+                     f"{', '.join(no_station)} without a Measurement Set, so those station rows are hyperbeam only "
+                     "(CPU vs GPU).")
     return results, notes
 
 
@@ -420,7 +433,8 @@ def main():
         print("Running hyperbeam (GPU)...", file=sys.stderr)
         gpu, gpu_note = hb_gpu_benchmarks(args, grid_file, hb_outputs)
 
-    print("Running EveryBeam...", file=sys.stderr)
+    print("Running EveryBeam (casacore may warn about its leap-second table; that's harmless here)...",
+          file=sys.stderr)
     eb_res, eb_notes = eb_benchmarks(args, grid_file, hb_outputs)
 
     # Tables.
