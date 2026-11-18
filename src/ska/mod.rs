@@ -37,6 +37,7 @@ pub(crate) mod beam;
 mod eep_grid;
 mod eep_sph;
 mod error;
+mod fastmath;
 mod ffi;
 #[cfg(any(feature = "cuda", feature = "hip"))]
 mod gpu;

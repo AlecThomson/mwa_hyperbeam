@@ -6,7 +6,9 @@
 
 use marlu::{c64, constants::VEL_C, AzEl, Jones};
 
-use super::{az_to_phi, everybeam_to_hyperbeam, par_map_jones, SkaBeamError, SkaElementResponse};
+use super::{
+    az_to_phi, everybeam_to_hyperbeam, fastmath, par_map_jones, SkaBeamError, SkaElementResponse,
+};
 
 /// An SKA-Low station: an element-response model, the positions of the
 /// elements and their weights.
@@ -49,6 +51,12 @@ pub struct SkaStation<E: SkaElementResponse> {
     positions_enu: Vec<[f64; 3]>,
     weights: Vec<f64>,
     rotation_rad: f64,
+    // The positions as separate East, North and Up arrays, for the
+    // vectorised array-factor code.
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    zs: Vec<f64>,
+    sum_weights: f64,
 }
 
 /// Get a station's rotation angle (as used by [`SkaStation::with_rotation`])
@@ -103,11 +111,19 @@ impl<E: SkaElementResponse> SkaStation<E> {
         if weights.iter().sum::<f64>() == 0.0 {
             return Err(SkaBeamError::AllElementsFlagged);
         }
+        let xs = positions_enu.iter().map(|p| p[0]).collect();
+        let ys = positions_enu.iter().map(|p| p[1]).collect();
+        let zs = positions_enu.iter().map(|p| p[2]).collect();
+        let sum_weights = weights.iter().sum();
         Ok(SkaStation {
             element,
             positions_enu,
             weights,
             rotation_rad: 0.0,
+            xs,
+            ys,
+            zs,
+            sum_weights,
         })
     }
 
@@ -150,18 +166,25 @@ impl<E: SkaElementResponse> SkaStation<E> {
         pointing_az_rad: f64,
         pointing_za_rad: f64,
     ) -> c64 {
+        let (k, ds) = self.phase_terms(az_rad, za_rad, freq_hz, pointing_az_rad, pointing_za_rad);
+        let (re, im) = fastmath::phasor_sum(k, ds, &self.xs, &self.ys, &self.zs, &self.weights);
+        c64::new(re, im) / self.sum_weights
+    }
+
+    /// The array-factor phase of element `r` is `k * (ds . r)`.
+    #[inline]
+    fn phase_terms(
+        &self,
+        az_rad: f64,
+        za_rad: f64,
+        freq_hz: f64,
+        pointing_az_rad: f64,
+        pointing_za_rad: f64,
+    ) -> (f64, [f64; 3]) {
         let s = enu_unit_vector(az_rad, za_rad);
         let s0 = enu_unit_vector(pointing_az_rad, pointing_za_rad);
         let ds = [s0[0] - s[0], s0[1] - s[1], s0[2] - s[2]];
-        let k = -std::f64::consts::TAU * freq_hz / VEL_C;
-        let sum_w: f64 = self.weights.iter().sum();
-        self.positions_enu
-            .iter()
-            .zip(&self.weights)
-            .filter(|(_, &w)| w != 0.0)
-            .map(|(r, &w)| c64::cis(k * (ds[0] * r[0] + ds[1] * r[1] + ds[2] * r[2])) * w)
-            .sum::<c64>()
-            / sum_w
+        (-std::f64::consts::TAU * freq_hz / VEL_C, ds)
     }
 
     /// The station response in EveryBeam's convention (`[[X_theta, X_phi],
@@ -183,21 +206,28 @@ impl<E: SkaElementResponse> SkaStation<E> {
             return Ok(e * af);
         }
 
-        let s = enu_unit_vector(az_rad, za_rad);
-        let s0 = enu_unit_vector(pointing_az_rad, pointing_za_rad);
-        let ds = [s0[0] - s[0], s0[1] - s[1], s0[2] - s[2]];
-        let k = -std::f64::consts::TAU * freq_hz / VEL_C;
-        let sum_w: f64 = self.weights.iter().sum();
+        let (k, ds) = self.phase_terms(az_rad, za_rad, freq_hz, pointing_az_rad, pointing_za_rad);
+        let n = self.xs.len();
+        let (mut re, mut im) = (vec![0.0; n], vec![0.0; n]);
+        fastmath::phasors(
+            k,
+            ds,
+            &self.xs,
+            &self.ys,
+            &self.zs,
+            &self.weights,
+            &mut re,
+            &mut im,
+        );
         let mut result = Jones::default();
-        for (i, (r, &w)) in self.positions_enu.iter().zip(&self.weights).enumerate() {
+        for (i, &w) in self.weights.iter().enumerate() {
             if w == 0.0 {
                 continue;
             }
-            let phasor = c64::cis(k * (ds[0] * r[0] + ds[1] * r[1] + ds[2] * r[2])) * w;
             let e = self.element.element_response(i, freq_hz, za_rad, phi)?;
-            result += e * phasor;
+            result += e * c64::new(re[i], im[i]);
         }
-        Ok(result / sum_w)
+        Ok(result / self.sum_weights)
     }
 
     /// Calculate the station-beam Jones matrix for a direction and pointing,
