@@ -51,10 +51,13 @@ What is compared, and how it is kept fair:
 
 EveryBeam computes SKA-Low station beams with the code it uses for Measurement
 Sets whose TELESCOPE_NAME is "SKA-LOW" (internally it calls this its OSKAR
-telescope type). Without a Measurement Set, EveryBeam 0.9.1 (the newest on
-PyPI) can only build such a station with the analytic dipole model, so the
-station comparison with EveryBeam is for ska-low-analytic only; the other
-models are tried in case a newer EveryBeam allows them. casacore may log
+telescope type). Here the station is built without a Measurement Set, with
+EveryBeam's `create_telescope`. In EveryBeam 0.9.1 (the newest on PyPI) that
+function has a hard-coded list of allowed element models that predates
+skalow_feko and gridded_eep (EveryBeam master adds them), so the station
+comparison with EveryBeam is for ska-low-analytic only there. The other models
+are tried, so a newer EveryBeam is used automatically. (Loading a real SKA-Low
+Measurement Set in EveryBeam is not affected by that list.) casacore may log
 warnings that its leap-second table is out of date; the benchmark does not
 depend on absolute time, so they can be ignored.
 """
@@ -333,9 +336,11 @@ def eb_benchmarks(args, grid_file, hb_outputs):
     _, med, _ = timed(lambda: [tel1.station_response(0.0, 0, args.freq, d, s0, rotate=False) for d in dirs], args.repeats)
     results["station_call_overhead_per_dir"] = med / len(dirs)
     if no_station:
-        notes.append(f"EveryBeam {version('everybeam')} can't build a station beam with "
-                     f"{', '.join(no_station)} without a Measurement Set, so those station rows are hyperbeam only "
-                     "(CPU vs GPU).")
+        notes.append(f"EveryBeam {version('everybeam')}'s create_telescope (used to build the test station "
+                     "without a Measurement Set) has a hard-coded list of element models that predates "
+                     f"{', '.join(EB_MODELS[n] for n in no_station)} (EveryBeam master adds them), so the "
+                     f"{', '.join(no_station)} station rows are hyperbeam only (CPU vs GPU). This is a gap in "
+                     "that EveryBeam function only; it doesn't affect real Measurement Sets.")
     return results, notes
 
 
